@@ -1,10 +1,10 @@
---// HORROR MODE V7 — CLIENT: монстр + предметы на твоей карте, Flare Gun, инвентарь (один LocalScript, сервер не нужен)
---// Никаких телепортов и генерации карты: монстр и предметы появляются прямо на карте плейса.
---// Куда класть: StarterPlayer -> StarterPlayerScripts -> LocalScript
---// (или просто запускай через исполнитель — скрипт ничего не берёт из Explorer).
---// Всё создаётся только у тебя на клиенте: темнота, туман, фонарик (клавиша F),
---// первое лицо, бег (Shift), эффекты старой камеры, звуки и монстр.
---// Монстра видишь и слышишь только ты.
+--// HORROR MODE V8 — CLIENT: monster + items on your map, Flare Gun, inventory, decoy, teleport (single LocalScript, no server needed)
+--// No teleporting you around and no generated map: the monster and items appear right on the place's map.
+--// Where to put it: StarterPlayer -> StarterPlayerScripts -> LocalScript
+--// (or just run it with an executor - the script does not use anything from Explorer).
+--// Everything is created only on your client: darkness, fog, flashlight (key F),
+--// first person, sprint (Shift), old-camera effects, sounds and the monster.
+--// Only you can see and hear the monster.
 
 local Players = game:GetService("Players")
 local Lighting = game:GetService("Lighting")
@@ -19,71 +19,83 @@ local camera = workspace.CurrentCamera
 local playerGui = player:WaitForChild("PlayerGui")
 
 ------------------------------------------------------------
--- НАСТРОЙКИ
+-- SETTINGS
 ------------------------------------------------------------
 local CONFIG = {
-	-- Атмосфера
-	FogEnd = 80,                 -- меньше = гуще туман
-	DisableMapLights = true,     -- выключить лампы карты (у тебя на клиенте)
+	-- Atmosphere
+	FogEnd = 80,                 -- lower = thicker fog
+	DisableMapLights = true,     -- turn off the map's lamps (client-side only)
 
-	-- Игрок
+	-- Player
 	PlayerWalkSpeed = 11,
 	PlayerSprintSpeed = 21,
-	StaminaSeconds = 12,         -- сколько секунд можно бежать
-	StaminaRegenSeconds = 8,     -- сколько секунд восстанавливается
+	StaminaSeconds = 12,         -- how many seconds you can sprint
+	StaminaRegenSeconds = 8,     -- seconds to fully recover
 
-	-- Фонарик
+	-- Flashlight
 	FlashlightKey = Enum.KeyCode.F,
 	FlashlightRange = 70,
-	FlashlightBrightness = 3,        -- мягкий край пятна
-	FlashlightAngle = 20,            -- ширина всего пятна (градусы)
-	FlashlightCoreBrightness = 6,    -- яркое ядро в центре пятна
-	FlashlightCoreAngle = 8,         -- ширина ядра (градусы)
-	FlashlightSightMultiplier = 0.5, -- при включённом фонарике дальность зрения монстра умножается на это число (меньше 1 = видит хуже)
+	FlashlightBrightness = 3,        -- soft edge of the spot
+	FlashlightAngle = 20,            -- width of the whole spot (degrees)
+	FlashlightCoreBrightness = 6,    -- bright core in the middle of the spot
+	FlashlightCoreAngle = 8,         -- width of the core (degrees)
+	FlashlightSightMultiplier = 0.5, -- with the flashlight on, the monster's sight range is multiplied by this (below 1 = sees worse)
 
-	-- Монстр
-	MonsterScale = 0.7,          -- размер монстра (0.7 = около 12 studs, игрок около 5)
-	MonsterWanderSpeed = 9,      -- патруль по лесу
-	MonsterSearchSpeed = 13,     -- идёт проверить, где в последний раз видел игрока
-	MonsterChaseSpeed = 24,      -- погоня (только пока видит игрока)
-	MonsterLungeSpeed = 30,      -- рывок, когда игрок близко и виден
-	MonsterFOV = 70,             -- угол обзора ПЕРЕД СОБОЙ в градусах (общий, по 35 в каждую сторону)
-	MonsterSightRange = 110,     -- как далеко видит
-	MonsterSightMemory = 0.7,    -- сек: сколько ещё «помнит», что видел игрока, после потери из виду
-	MonsterSearchTime = 5,       -- сек: сколько осматривается на месте, где потерял игрока
-	MonsterSpawnDistance = 80,   -- на каком расстоянии от игрока появляется монстр
+	-- Monster
+	MonsterScale = 0.7,          -- monster size (0.7 = about 12 studs tall, the player is about 5)
+	MonsterWanderSpeed = 9,      -- patrol speed
+	MonsterSearchSpeed = 13,     -- going to check where it last saw the player
+	MonsterChaseSpeed = 24,      -- chase (only while it sees the player)
+	MonsterLungeSpeed = 30,      -- lunge when the player is close and visible
+	MonsterFOV = 70,             -- field of view straight AHEAD in degrees (total, 35 each side)
+	MonsterSightRange = 110,     -- how far it can see
+	MonsterSightMemory = 0.7,    -- seconds it still "remembers" seeing the player after losing sight
+	MonsterSearchTime = 5,       -- seconds it looks around where it lost the player
+	MonsterSpawnDistance = 80,   -- distance from the player where the monster spawns
 	MonsterDamage = 50,
-	MonsterAttackRange = 8,      -- дальность удара по горизонтали (у него очень длинные руки)
-	MonsterStalkSpeed = 12,      -- скорость, когда крадётся на корточках за спиной
-	StalkDistance = 9,           -- на каком расстоянии держится за спиной (studs)
-	StalkMaxRange = 70,          -- дальше этого теряет игрока
-	StalkStrikeRange = 28,       -- если игрок обернулся и монстр ближе этого, он бросается и убивает
-	StrikeWindup = 0.7,          -- сек до смертельного броска (успей выстрелить флером в лицо!)
+	MonsterAttackRange = 8,      -- horizontal reach of its attack (very long arms)
+	MonsterStalkSpeed = 12,      -- speed while creeping crouched behind you
+	StalkDistance = 9,           -- distance it keeps behind you (studs)
+	StalkMaxRange = 70,          -- loses the player beyond this
+	StalkStrikeRange = 28,       -- if you turn around and the monster is closer than this, it lunges and kills
+	StrikeWindup = 0.7,          -- seconds before the lethal lunge (shoot a flare in its face!)
 	MonsterAttackCooldown = 1.0,
 	MonsterRespawnTime = 8,
 
-	MonsterEyeColor = Color3.fromRGB(255, 40, 30),  -- цвет светящихся глаз (больше ничего у монстра не светится)
+	-- Teleport: if you get too far away, the monster jumps closer
+	TeleportTriggerDistance = 300, -- when the player is farther than this from the monster...
+	TeleportDistance = 200,        -- ...the monster teleports to this distance from the player
+	TeleportCooldown = 6,
 
-	-- Предметы
-	ItemsOnMap = 14,             -- сколько предметов разбросано вокруг места старта
-	ItemRadius = 220,            -- в каком радиусе от места старта (studs)
-	ItemMinDistance = 45,        -- минимальное расстояние между предметами (studs)
-	FlareKey = Enum.KeyCode.G,   -- выстрел флером
-	InventoryKey = Enum.KeyCode.I, -- открыть/закрыть инвентарь
-	MedkitKey = Enum.KeyCode.H,  -- использовать аптечку
-	EnergyKey = Enum.KeyCode.V,  -- выпить энергетик
+	-- Decoy: the monster disguises itself as an ordinary player in front of you
+	DecoyMinInterval = 45,         -- seconds between decoys (random between min and max)
+	DecoyMaxInterval = 90,
+	DecoyDistance = 55,            -- how far in front of you the fake player appears
+	DecoyTriggerDistance = 22,     -- come closer than this and the monster bursts out
+	DecoyLifetime = 70,            -- the decoy disappears after this many seconds if ignored
+
+	MonsterEyeColor = Color3.fromRGB(255, 40, 30),  -- color of the glowing eyes (nothing else on the monster glows)
+
+	-- Items
+	ItemsOnMap = 14,             -- how many items are scattered around the start point
+	ItemRadius = 220,            -- radius around the start point (studs)
+	ItemMinDistance = 45,        -- minimum distance between items (studs)
+	FlareKey = Enum.KeyCode.G,   -- fire a flare
+	InventoryKey = Enum.KeyCode.I, -- open/close inventory
+	MedkitKey = Enum.KeyCode.H,  -- use a medkit
+	EnergyKey = Enum.KeyCode.V,  -- drink an energy drink
 	FlareReload = 1.2,
-	FlareBurnTime = 14,          -- сколько секунд горит флер
-	FlareStunDirect = 7,         -- сек оглушения при прямом попадании
-	FlareStunNear = 3.5,         -- сек оглушения, если флер упал рядом и монстр видит вспышку
+	FlareBurnTime = 14,          -- how many seconds a flare burns
+	FlareStunDirect = 7,         -- stun seconds on a direct hit
+	FlareStunNear = 3.5,         -- stun seconds if the flare lands nearby and the monster sees the flash
 	FlareNearRadius = 25,
 	MedkitHeal = 50,
 
-	-- Эффекты старой камеры
+	-- Old camera effects
 	EffectRange = 70,
 
-	-- ЗВУКИ: по умолчанию встроенные звуки Roblox, обработанные эффектами.
-	-- Замени любую строку на свой ID: "rbxassetid://1234567890". Пустая строка "" = выключено.
+	-- SOUNDS: by default the built-in Roblox sounds, processed with effects.
+	-- Replace any line with your own ID: "rbxassetid://1234567890". An empty string "" = disabled.
 	Sounds = {
 		Ambient   = "rbxasset://sounds/bass.wav",
 		Heartbeat = "rbxasset://sounds/bass.wav",
@@ -95,14 +107,14 @@ local CONFIG = {
 		Click     = "rbxasset://sounds/switch.wav",
 		FlareShot = "rbxasset://sounds/snap.mp3",
 		Pickup    = "rbxasset://sounds/switch.wav",
-		Walk      = "rbxasset://sounds/action_footsteps_plastic.mp3", -- шаги игрока
+		Walk      = "rbxasset://sounds/action_footsteps_plastic.mp3", -- player footsteps
 		InvOpen   = "rbxasset://sounds/switch.wav",
 		InvClose  = "rbxasset://sounds/switch.wav",
 	},
 }
 
 ------------------------------------------------------------
--- ХЕЛПЕРЫ
+-- HELPERS
 ------------------------------------------------------------
 local function new(class, props, parent, keep)
 	local o = Instance.new(class)
@@ -140,7 +152,7 @@ local function addDistortion(sound, level)
 end
 
 ------------------------------------------------------------
--- ОЧИСТКА ПРЕДЫДУЩЕГО ЗАПУСКА (если скрипт запустили повторно)
+-- CLEANUP OF THE PREVIOUS RUN (if the script was started again)
 ------------------------------------------------------------
 do
 	local g = playerGui:FindFirstChild("OldCamera")
@@ -163,7 +175,7 @@ pcall(function()
 end)
 
 ------------------------------------------------------------
--- 1. ТЕМНОТА И ТУМАН (держим значения, даже если игра пытается их менять)
+-- 1. DARKNESS AND FOG (values are held even if the game tries to change them)
 ------------------------------------------------------------
 local function applyLightingProps()
 	Lighting.ClockTime = 0
@@ -228,7 +240,7 @@ if CONFIG.DisableMapLights then
 end
 
 ------------------------------------------------------------
--- 2. ЗВУКИ (глобальные)
+-- 2. SOUNDS (global)
 ------------------------------------------------------------
 local ambient = makeSound(SoundService, CONFIG.Sounds.Ambient, {Looped = true, Volume = 0.35, PlaybackSpeed = 0.3})
 addReverb(ambient, -3)
@@ -246,7 +258,7 @@ local invCloseSnd = makeSound(SoundService, CONFIG.Sounds.InvClose, {Volume = 0.
 local stepSnd = makeSound(SoundService, CONFIG.Sounds.Walk, {Looped = true, Volume = 0})
 
 ------------------------------------------------------------
--- 3. ЭФФЕКТЫ СТАРОЙ КАМЕРЫ
+-- 3. OLD CAMERA EFFECTS
 ------------------------------------------------------------
 local cc = new("ColorCorrectionEffect", {
 	Name = "OldCamCC",
@@ -266,7 +278,7 @@ local gui = new("ScreenGui", {
 	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 }, playerGui)
 
--- виньетка
+-- vignette
 local vignette = {}
 local function vigEdge(pos, size, rot)
 	local f = new("Frame", {
@@ -290,7 +302,7 @@ vigEdge(UDim2.new(0, 0, 0.7, 0), UDim2.new(1, 0, 0.3, 0), 270)
 vigEdge(UDim2.new(0, 0, 0, 0), UDim2.new(0.25, 0, 1, 0), 0)
 vigEdge(UDim2.new(0.75, 0, 0, 0), UDim2.new(0.25, 0, 1, 0), 180)
 
--- строчная развёртка
+-- scanlines
 local lines = new("Frame", {
 	Size = UDim2.fromScale(1, 1),
 	BackgroundTransparency = 1,
@@ -308,7 +320,7 @@ do
 	end
 end
 
--- зерно / помехи
+-- grain / static
 local dots = {}
 for i = 1, 70 do
 	dots[i] = new("Frame", {
@@ -319,7 +331,7 @@ for i = 1, 70 do
 	}, gui)
 end
 
--- полоса трекинга VHS
+-- VHS tracking bar
 local bar = new("Frame", {
 	Size = UDim2.new(1, 0, 0, 10),
 	BackgroundColor3 = Color3.new(1, 1, 1),
@@ -328,7 +340,7 @@ local bar = new("Frame", {
 	Visible = false,
 }, gui)
 
--- рамка видоискателя
+-- viewfinder frame
 local function bracket(ax, ay)
 	local x = ax == 0 and 24 or -24
 	local y = ay == 0 and 24 or -24
@@ -382,7 +394,7 @@ label("CAM 01", UDim2.new(1, -64, 0, 60), Vector2.new(1, 0), Enum.TextXAlignment
 label(os.date("%d.%m.%Y"), UDim2.new(1, -64, 1, -90), Vector2.new(1, 1), Enum.TextXAlignment.Right, 20)
 label("BAT [|||  ]", UDim2.new(0, 64, 1, -90), Vector2.new(0, 1), Enum.TextXAlignment.Left, 20)
 
--- красная вспышка при ударе
+-- red flash on hit
 local flash = new("Frame", {
 	Size = UDim2.fromScale(1, 1),
 	BackgroundColor3 = Color3.fromRGB(170, 0, 0),
@@ -390,7 +402,7 @@ local flash = new("Frame", {
 	BorderSizePixel = 0,
 }, gui)
 
--- полоска выносливости
+-- stamina bar
 local staminaBack = new("Frame", {
 	AnchorPoint = Vector2.new(0.5, 1),
 	Position = UDim2.new(0.5, 0, 1, -50),
@@ -407,7 +419,7 @@ local staminaFill = new("Frame", {
 	BorderSizePixel = 0,
 }, staminaBack)
 
--- подсказка про флеры, уведомления, затемнение при убийстве
+-- flare hint, notifications, fade-out on death
 local flareLabel = label("", UDim2.new(0.5, 0, 1, -110), Vector2.new(0.5, 1), Enum.TextXAlignment.Center, 20)
 flareLabel.Size = UDim2.fromOffset(460, 28)
 flareLabel.Visible = false
@@ -440,7 +452,7 @@ local function showToast(text)
 end
 
 ------------------------------------------------------------
--- 4. СОСТОЯНИЕ, ФОНАРИК, ВВОД
+-- 4. STATE, FLASHLIGHT, INPUT
 ------------------------------------------------------------
 local currentMonster = nil      -- {model, root}
 local stamina, exhausted, sprintHeld = 1, false, false
@@ -465,13 +477,13 @@ local function updateFlareHud()
 	if hasFlareGun then
 		flareLabel.Text = string.format("FLARE GUN: %d   [G]", flares)
 	else
-		flareLabel.Text = string.format("ФЛЕРЫ: %d  (нужен Flare Gun)", flares)
+		flareLabel.Text = string.format("FLARES: %d  (Flare Gun needed)", flares)
 	end
 	refreshInventory()
 end
 
 ------------------------------------------------------------
--- ИНВЕНТАРЬ (клавиша I)
+-- INVENTORY (key I)
 ------------------------------------------------------------
 local medkits, energies = 0, 0
 local invOpen = false
@@ -490,7 +502,7 @@ local invPanel = new("Frame", {
 }, gui)
 new("UIStroke", {Color = Color3.fromRGB(190, 200, 180), Thickness = 1.5, Transparency = 0.4}, invPanel)
 
--- невидимая «модальная» кнопка освобождает мышь в режиме первого лица, пока открыт инвентарь
+-- an invisible "modal" button frees the mouse in first person while the inventory is open
 new("TextButton", {
 	Size = UDim2.fromScale(1, 1),
 	BackgroundTransparency = 1,
@@ -514,8 +526,8 @@ local function invText(text, pos, size, textSize, color, parent, align)
 	}, parent)
 end
 
-invText("ИНВЕНТАРЬ", UDim2.new(0, 0, 0, 12), UDim2.new(1, 0, 0, 30), 26, nil, invPanel)
-invText("[" .. CONFIG.InventoryKey.Name .. "] закрыть", UDim2.new(0, 0, 0, 40), UDim2.new(1, 0, 0, 20), 16, Color3.fromRGB(170, 175, 165), invPanel)
+invText("INVENTORY", UDim2.new(0, 0, 0, 12), UDim2.new(1, 0, 0, 30), 26, nil, invPanel)
+invText("[" .. CONFIG.InventoryKey.Name .. "] close", UDim2.new(0, 0, 0, 40), UDim2.new(1, 0, 0, 20), 16, Color3.fromRGB(170, 175, 165), invPanel)
 local invFooter = invText("", UDim2.new(0, 0, 1, -34), UDim2.new(1, 0, 0, 26), 18, Color3.fromRGB(200, 210, 190), invPanel)
 
 local function makeCard(index, title, iconText, iconColor, hint, useCallback)
@@ -549,7 +561,7 @@ local function makeCard(index, title, iconText, iconColor, hint, useCallback)
 			Size = UDim2.new(1, -20, 0, 30),
 			BackgroundColor3 = Color3.fromRGB(60, 90, 60),
 			BorderSizePixel = 0,
-			Text = "ИСПОЛЬЗОВАТЬ",
+			Text = "USE",
 			Font = Enum.Font.Code,
 			TextSize = 15,
 			TextColor3 = Color3.new(1, 1, 1),
@@ -561,13 +573,13 @@ local function makeCard(index, title, iconText, iconColor, hint, useCallback)
 	return {card = card, count = count}
 end
 
-local cardGun = makeCard(1, "Flare Gun", "FG", Color3.fromRGB(230, 110, 40), "Выстрел: [" .. CONFIG.FlareKey.Name .. "]. Оглушает монстра", nil)
-local cardFlares = makeCard(2, "Флеры", "FL", Color3.fromRGB(220, 50, 40), "Заряды для Flare Gun", nil)
-local cardMedkit = makeCard(3, "Аптечка", "+", Color3.fromRGB(235, 235, 235), "Лечит. Быстро: [" .. CONFIG.MedkitKey.Name .. "]", function() useMedkit() end)
-local cardEnergy = makeCard(4, "Энергетик", "EN", Color3.fromRGB(60, 220, 190), "Восстанавливает бег. Быстро: [" .. CONFIG.EnergyKey.Name .. "]", function() useEnergy() end)
+local cardGun = makeCard(1, "Flare Gun", "FG", Color3.fromRGB(230, 110, 40), "Fire: [" .. CONFIG.FlareKey.Name .. "]. Stuns the monster", nil)
+local cardFlares = makeCard(2, "Flares", "FL", Color3.fromRGB(220, 50, 40), "Ammo for the Flare Gun", nil)
+local cardMedkit = makeCard(3, "Medkit", "+", Color3.fromRGB(235, 235, 235), "Heals. Quick key: [" .. CONFIG.MedkitKey.Name .. "]", function() useMedkit() end)
+local cardEnergy = makeCard(4, "Energy Drink", "EN", Color3.fromRGB(60, 220, 190), "Restores sprint. Quick key: [" .. CONFIG.EnergyKey.Name .. "]", function() useEnergy() end)
 
 refreshInventory = function()
-	cardGun.count.Text = hasFlareGun and "Есть" or "Нет"
+	cardGun.count.Text = hasFlareGun and "Have" or "None"
 	cardFlares.count.Text = "x" .. flares
 	cardMedkit.count.Text = "x" .. medkits
 	cardEnergy.count.Text = "x" .. energies
@@ -594,34 +606,34 @@ end
 useMedkit = function()
 	if killing then return end
 	if medkits <= 0 then
-		showToast("Нет аптечек")
+		showToast("No medkits")
 		return
 	end
 	local ch = player.Character
 	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
 	if not hum or hum.Health <= 0 then return end
 	if hum.Health >= hum.MaxHealth then
-		showToast("Здоровье и так полное")
+		showToast("Health is already full")
 		return
 	end
 	medkits -= 1
 	hum.Health = math.min(hum.MaxHealth, hum.Health + CONFIG.MedkitHeal)
 	if pickSnd then pickSnd:Play() end
-	showToast("Аптечка: +" .. CONFIG.MedkitHeal .. " HP")
+	showToast("Medkit: +" .. CONFIG.MedkitHeal .. " HP")
 	refreshInventory()
 end
 
 useEnergy = function()
 	if killing then return end
 	if energies <= 0 then
-		showToast("Нет энергетиков")
+		showToast("No energy drinks")
 		return
 	end
 	energies -= 1
 	stamina = 1
 	exhausted = false
 	if pickSnd then pickSnd:Play() end
-	showToast("Энергетик: выносливость восстановлена")
+	showToast("Energy drink: stamina restored")
 	refreshInventory()
 end
 
@@ -699,7 +711,7 @@ if UserInputService.TouchEnabled then
 		new("UICorner", {CornerRadius = UDim.new(1, 0)}, btn)
 		return btn
 	end
-	local run = touchButton("БЕГ", -150)
+	local run = touchButton("RUN", -150)
 	run.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
 			sprintHeld = true
@@ -710,15 +722,15 @@ if UserInputService.TouchEnabled then
 			sprintHeld = false
 		end
 	end)
-	local light = touchButton("СВЕТ", -250)
+	local light = touchButton("LIGHT", -250)
 	light.Activated:Connect(toggleFlashlight)
-	local flareBtn = touchButton("ФЛЕЕР", -350)
+	local flareBtn = touchButton("FLARE", -350)
 	flareBtn.Activated:Connect(function() fireFlare() end)
-	local invBtn = touchButton("ИНВ", -450)
+	local invBtn = touchButton("INV", -450)
 	invBtn.Activated:Connect(function() setInventory(not invOpen) end)
 end
 
--- события монстра
+-- monster events
 local function onHit()
 	flash.BackgroundTransparency = 0.3
 	TweenService:Create(flash, TweenInfo.new(0.7), {BackgroundTransparency = 1}):Play()
@@ -735,7 +747,7 @@ local function onSpotted()
 	if scareSnd then scareSnd:Play() end
 end
 
--- случайные «срывы трекинга»
+-- random "tracking glitches"
 task.spawn(function()
 	while gui.Parent do
 		task.wait(math.random(40, 100) / 10 / (1 + eff * 4))
@@ -752,7 +764,7 @@ task.spawn(function()
 end)
 
 ------------------------------------------------------------
--- 5. МОНСТР (локальный, виден только тебе)
+-- 5. MONSTER (local, only you can see it)
 ------------------------------------------------------------
 local function buildMonster()
 	local S = CONFIG.MonsterScale
@@ -806,7 +818,7 @@ local function buildMonster()
 	root.CanCollide = true
 	root.Parent = model
 
-	-- таз, узкий живот, узкая грудная клетка
+	-- pelvis, narrow abdomen, narrow ribcage
 	local pelvis = part("Pelvis", 1.6, 0.8, 0.8, darkBody)
 	joint(root, pelvis, C(0, -0.3, 0))
 
@@ -830,7 +842,7 @@ local function buildMonster()
 		joint(abdomen, v, C(0, -0.4 + (i - 1) * 0.4, 0.4))
 	end
 
-	-- чёрные крюки-клешни на поясе
+	-- black hook-claws at the waist
 	for _, side in ipairs({-1, 1}) do
 		for k = 0, 1 do
 			local claw = part("WaistClaw", 0.12, 1.1, 0.12, black)
@@ -838,7 +850,7 @@ local function buildMonster()
 		end
 	end
 
-	-- длинная тонкая шея с проволочными кольцами
+	-- long thin neck with wire rings
 	local neck = part("Neck", 0.35, 1.6, 0.35, black)
 	local neckBase = C(0, 1.1, 0) * CFrame.Angles(0.1, 0, 0)
 	local jNeck = joint(chest, neck, neckBase, C(0, -0.8, 0))
@@ -848,14 +860,14 @@ local function buildMonster()
 	end
 
 	----------------------------------------------------------
-	-- ГОЛОВА: длинное плоское бледное лицо, длинный нос, огромные чёрные
-	-- круглые глазницы, маленький тёмно-красный рот, дикие чёрные волосы
+	-- HEAD: long flat pale face, long nose, huge black
+	-- round eye sockets, small dark-red mouth, wild black hair
 	----------------------------------------------------------
 	local head = part("Head", 1.0, 1.9, 0.75, skinFace, Enum.Material.SmoothPlastic)
 	local headBase = C(0, 0.8, 0) * CFrame.Angles(-0.04, 0, 0)
 	local jHead = joint(neck, head, headBase, C(0, -0.95, 0.05))
 
-	-- длинный нос
+	-- long nose
 	local nose = part("Nose", 0.3, 0.95, 0.35, skinNose, Enum.Material.SmoothPlastic)
 	joint(head, nose, C(0, -0.05, -0.5))
 	local noseTip = part("NoseTip", 0.42, 0.28, 0.3, skinNose, Enum.Material.SmoothPlastic)
@@ -863,7 +875,7 @@ local function buildMonster()
 	local brow = part("Brow", 0.95, 0.16, 0.22, skinNose, Enum.Material.SmoothPlastic)
 	joint(head, brow, C(0, 0.58, -0.4))
 
-	-- круглые чёрные глазницы с белым ободком; в центре крошечный светящийся зрачок
+	-- round black eye sockets with a white rim; a tiny glowing pupil in the center
 	local eyes = {}
 	for _, side in ipairs({-1, 1}) do
 		local rim = part("EyeRim", 0.1, 0.52, 0.52, eyeRim, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
@@ -875,7 +887,7 @@ local function buildMonster()
 		table.insert(eyes, eye)
 	end
 
-	-- рот: тёмная полость в голове, подвижная челюсть с тёмно-красными губами
+	-- mouth: dark cavity in the head, movable jaw with dark-red lips
 	local mouthHole = part("MouthHole", 0.5, 0.3, 0.1, black)
 	joint(head, mouthHole, C(0, -0.58, -0.37))
 
@@ -887,7 +899,7 @@ local function buildMonster()
 	local mouthIn = part("MouthIn", 0.42, 0.1, 0.1, black)
 	joint(jaw, mouthIn, C(0, 0.22, -0.37))
 
-	-- волосы: тёмная шапка, пряди по бокам лица, сзади, кудри-проволока и длинные пряди
+	-- hair: dark cap, locks at the sides and back, wire curls and long strands
 	local hairTop = part("HairTop", 1.3, 0.6, 1.1, black)
 	joint(head, hairTop, C(0, 1.0, 0.05))
 	local hairBack = part("HairBack", 1.3, 1.9, 0.5, black)
@@ -914,7 +926,7 @@ local function buildMonster()
 		end
 	end
 
-	-- руки: тонкое плечо, сгиб, длинное предплечье, переходящее в чёрный шип у земли
+	-- arms: thin upper arm, elbow, long forearm ending in a black spike at the ground
 	local arms = {}
 	for _, side in ipairs({-1, 1}) do
 		local upper = part(side < 0 and "UpperArmL" or "UpperArmR", 0.42, 4.0, 0.42, maroon)
@@ -940,7 +952,7 @@ local function buildMonster()
 		arms[side] = {sh = jSh, shPos = shPos, el = jEl, elPos = elPos}
 	end
 
-	-- ноги: тонкое бедро, толстая голень, длинный шип вместо стопы
+	-- legs: thin thigh, thick shin, long spike instead of a foot
 	local legs = {}
 	for _, side in ipairs({-1, 1}) do
 		local thigh = part(side < 0 and "ThighL" or "ThighR", 0.5, 3.8, 0.5, maroon)
@@ -966,8 +978,8 @@ local function buildMonster()
 		legs[side] = {hip = jHip, hipPos = hipPos, knee = jKnee, kneePos = kneePos}
 	end
 
-	local STAND_HIP = 9.1   -- высота бёдер над землёй (в юнитах модели), стоя
-	local CROUCH_HIP = 5.2  -- присев
+	local STAND_HIP = 9.1   -- hip height above the ground (model units), standing
+	local CROUCH_HIP = 5.2  -- crouched
 
 	local humanoid = Instance.new("Humanoid")
 	humanoid.RigType = Enum.HumanoidRigType.R15
@@ -983,7 +995,7 @@ local function buildMonster()
 
 	model.PrimaryPart = root
 
-	-- звуки монстра (3D)
+	-- monster sounds (3D)
 	local function s3d(id, extra)
 		local props = {
 			RollOffMode = Enum.RollOffMode.InverseTapered,
@@ -1005,7 +1017,7 @@ local function buildMonster()
 	local hit = s3d(CONFIG.Sounds.Hit, {Volume = 2, PlaybackSpeed = 0.7})
 
 	----------------------------------------------------------
-	-- АНИМАЦИЯ: ходьба, БЕГ (в погоне), приседание (крадётся за спиной), оглушение
+	-- ANIMATION: walk, RUN (when chasing), crouch (creeping behind you), stun
 	----------------------------------------------------------
 	local t, phase = 0, 0
 	local eyesBright = true
@@ -1015,9 +1027,9 @@ local function buildMonster()
 	local function update(dt, speed, state, attackT, stunned)
 		t += dt
 		local chasing = (state == "chase" or state == "strike" or state == "kill")
-		local crouching = (state == "stalk") and not stunned
+		local crouching = (state == "stalk" or state == "emerge") and not stunned
 
-		-- плавные переходы между походкой, бегом и приседанием
+		-- smooth blending between walk, run and crouch
 		local runTarget = (chasing and speed > 12) and 1 or 0
 		runK += (runTarget - runK) * math.min(dt * 8, 1)
 		crouchK += ((crouching and 1 or 0) - crouchK) * math.min(dt * 6, 1)
@@ -1027,7 +1039,7 @@ local function buildMonster()
 		local sw = math.sin(phase)
 		local stride = 0.5 + 0.45 * runK - 0.15 * crouchK
 
-		-- ноги: в беге широкий шаг и сильный подъём колена, в приседе согнуты почти пополам
+		-- legs: wide stride and high knee lift when running, almost folded in half when crouching
 		for _, side in ipairs({-1, 1}) do
 			local L = legs[side]
 			local ph = phase + (side < 0 and 0 or math.pi)
@@ -1037,14 +1049,14 @@ local function buildMonster()
 			L.knee.C0 = L.kneePos * CFrame.Angles(kneeX, 0, -side * 0.12)
 		end
 
-		-- высота бёдер: присев, монстр опускается к земле
+		-- hip height: when crouching the monster lowers to the ground
 		local hipH = STAND_HIP + (CROUCH_HIP - STAND_HIP) * crouchK
 		if math.abs(hipH - lastHip) > 0.01 then
 			lastHip = hipH
 			humanoid.HipHeight = hipH * S
 		end
 
-		-- руки: висят до земли; в беге размашисто работают; в приседе упираются вперёд как у зверя
+		-- arms: hang to the ground; swing wide when running; brace forward like an animal when crouching
 		for _, side in ipairs({-1, 1}) do
 			local A = arms[side]
 			local swingX = (side < 0 and -sw or sw) * (0.3 + 0.7 * runK) * k
@@ -1065,22 +1077,27 @@ local function buildMonster()
 				spread = 0.3
 				elbowX = 1.4
 			end
+			if state == "emerge" then
+				swingX = 2.6 + math.sin(t * 9 + side) * 0.35
+				spread = 0.25
+				elbowX = 0.8 + math.sin(t * 7) * 0.3
+			end
 			swingX += math.sin(t * 0.8 + side) * 0.04
 			A.sh.C0 = A.shPos * CFrame.Angles(swingX, 0, side * spread)
 			A.el.C0 = A.elPos * CFrame.Angles(elbowX, 0, -side * (spread + 0.05))
 		end
 
-		-- корпус: в беге и в приседе наклонён вперёд; голова задрана, чтобы смотреть на цель
+		-- torso: leans forward when running and crouching; head tilted up to watch the target
 		local lean = 0.2 * runK + 0.3 * crouchK
 		jAbd.C0 = abdBase * CFrame.Angles(-lean + math.sin(t * 1.5) * 0.02, sw * 0.08 * k, 0)
 		jChest.C0 = chestBase * CFrame.Angles(-lean * 1.5 + math.sin(t * 1.5 + 1) * 0.02, sw * (0.1 + 0.1 * runK) * k, 0)
 		jNeck.C0 = neckBase * CFrame.Angles(0.2 * runK + 0.4 * crouchK + math.sin(t * 0.9) * 0.05, 0, math.sin(t * 0.5) * 0.05)
-		local twitch = (chasing and math.sin(t * 23) * 0.06 or 0) + (stunned and math.sin(t * 32) * 0.3 or 0)
+		local twitch = (chasing and math.sin(t * 23) * 0.06 or 0) + (stunned and math.sin(t * 32) * 0.3 or 0) + (state == "emerge" and math.sin(t * 27) * 0.25 or 0)
 		jHead.C0 = headBase * CFrame.Angles(0.2 * runK + 0.4 * crouchK, math.sin(t * 1.1) * 0.12 + twitch, math.sin(t * 0.6) * 0.14)
 
-		-- рот: при погоне и ударе раскрывается
+		-- mouth: opens when chasing and attacking
 		local open
-		if attackT > 0 or stunned then
+		if attackT > 0 or stunned or state == "emerge" then
 			open = -0.9
 		elseif chasing then
 			open = -0.3 - 0.25 * math.sin(t * 14)
@@ -1089,7 +1106,7 @@ local function buildMonster()
 		end
 		jJaw.C0 = jawBase * CFrame.Angles(open, 0, 0)
 
-		-- волосы колышутся
+		-- hair sways
 		for _, st in ipairs(strands) do
 			st.joint.C0 = st.base * CFrame.Angles(
 				math.sin(t * 1.3 + st.seed) * 0.12 + sw * 0.15 * k - 0.3 * runK,
@@ -1097,7 +1114,7 @@ local function buildMonster()
 				math.sin(t * 0.9 + st.seed * 2) * 0.1)
 		end
 
-		-- глаза мерцают, когда оглушён
+		-- eyes flicker when stunned
 		local bright = (not stunned) or math.sin(t * 35) > 0
 		if bright ~= eyesBright then
 			eyesBright = bright
@@ -1110,7 +1127,7 @@ local function buildMonster()
 			local want = speed > 3
 			if steps.Playing ~= want then steps.Playing = want end
 			steps.PlaybackSpeed = 0.4 + speed / 70
-			steps.Volume = 2.5 * (1 - 0.75 * crouchK) -- крадётся почти бесшумно
+			steps.Volume = 2.5 * (1 - 0.75 * crouchK) -- creeps almost silently
 		end
 	end
 
@@ -1150,21 +1167,21 @@ local function stunMonster(seconds)
 end
 
 local function killPlayer(target)
-	-- BreakJoints с клиента часто отклоняется сервером (RejectCharacterDeletions),
-	-- поэтому убиваем через Health и состояние Dead, BreakJoints — запасной вариант
+	-- BreakJoints from a client is often rejected by the server (RejectCharacterDeletions),
+	-- so we kill through Health and the Dead state; BreakJoints is only a fallback
 	pcall(function() target.hum.Health = 0 end)
 	pcall(function() target.hum:ChangeState(Enum.HumanoidStateType.Dead) end)
 	pcall(function() target.char:BreakJoints() end)
 end
 
 ------------------------------------------------------------
--- ПРЕДМЕТЫ
+-- ITEMS
 ------------------------------------------------------------
 local ITEM_INFO = {
 	flaregun = {label = "Flare Gun", color = Color3.fromRGB(255, 120, 40)},
-	flares   = {label = "Флеры x2", color = Color3.fromRGB(255, 60, 40)},
-	medkit   = {label = "Аптечка", color = Color3.fromRGB(255, 255, 255)},
-	energy   = {label = "Энергетик", color = Color3.fromRGB(60, 255, 200)},
+	flares   = {label = "Flares x2", color = Color3.fromRGB(255, 60, 40)},
+	medkit   = {label = "Medkit", color = Color3.fromRGB(255, 255, 255)},
+	energy   = {label = "Energy Drink", color = Color3.fromRGB(60, 255, 200)},
 }
 
 local function pickupItem(kind)
@@ -1172,17 +1189,17 @@ local function pickupItem(kind)
 		hasFlareGun = true
 		flares += 2
 		updateFlareHud()
-		showToast("Flare Gun и 2 флера  (G — выстрелить)")
+		showToast("Flare Gun and 2 flares  (G to fire)")
 	elseif kind == "flares" then
 		flares += 2
 		updateFlareHud()
-		showToast("+2 флера")
+		showToast("+2 flares")
 	elseif kind == "medkit" then
 		medkits += 1
-		showToast("Аптечка в инвентаре  [" .. CONFIG.MedkitHeal .. " HP]  (" .. CONFIG.MedkitKey.Name .. " — использовать)")
+		showToast("Medkit added  [" .. CONFIG.MedkitHeal .. " HP]  (" .. CONFIG.MedkitKey.Name .. " to use)")
 	elseif kind == "energy" then
 		energies += 1
-		showToast("Энергетик в инвентаре  (" .. CONFIG.EnergyKey.Name .. " — выпить)")
+		showToast("Energy drink added  (" .. CONFIG.EnergyKey.Name .. " to drink)")
 	end
 	refreshInventory()
 	if pickSnd then pickSnd:Play() end
@@ -1231,11 +1248,11 @@ local function makeItem(kind, pos, parent)
 			Color3.fromRGB(200, 200, 205), Enum.Material.Metal, Enum.PartType.Cylinder)
 	end
 
-	-- слабая подсветка, чтобы предмет можно было найти в темноте
+	-- faint glow so the item can be found in the dark
 	new("PointLight", {Color = info.color, Range = 7, Brightness = 0.8}, main, true)
 
 	local prompt = new("ProximityPrompt", {
-		ActionText = "Взять",
+		ActionText = "Take",
 		ObjectText = info.label,
 		HoldDuration = 0.2,
 		MaxActivationDistance = 9,
@@ -1253,7 +1270,7 @@ local function makeItem(kind, pos, parent)
 end
 
 ------------------------------------------------------------
--- ТОЧКИ НА КАРТЕ: монстр и предметы работают прямо на карте плейса
+-- MAP POINTS: monster and items work directly on the place's map
 ------------------------------------------------------------
 local function randomMapPoint(minR, maxR, around)
 	local tgt = getTarget()
@@ -1276,11 +1293,11 @@ local function randomMapPoint(minR, maxR, around)
 		local a = math.random() * math.pi * 2
 		local r = minR + math.random() * (maxR - minR)
 		local x, z = c.X + math.cos(a) * r, c.Z + math.sin(a) * r
-		-- луч идёт сверху вниз от уровня чуть выше головы, чтобы не упираться в крышу
+		-- the ray goes top-down from just above head height so it does not hit the roof
 		local hit = workspace:Raycast(Vector3.new(x, c.Y + 6, z), Vector3.new(0, -80, 0), rayParams)
 		if hit and hit.Normal.Y > 0.85 and hit.Instance.CanCollide and hit.Material ~= Enum.Material.Water then
 			local pos = hit.Position
-			-- над точкой должно быть свободное место (не внутри стены или мебели)
+			-- there must be free space above the point (not inside a wall or furniture)
 			local parts = workspace:GetPartBoundsInRadius(pos + Vector3.new(0, 5, 0), 3.5, overlap)
 			if #parts == 0 then
 				return pos
@@ -1329,8 +1346,8 @@ local function spawnItems()
 		return true
 	end
 
-	-- ставит предмет так, чтобы он лежал не ближе ItemMinDistance к остальным
-	-- (если места мало, к концу попыток требование смягчается вдвое)
+	-- places an item no closer than ItemMinDistance to the others
+	-- (if space is tight, the requirement is halved near the end of the attempts)
 	local function place(kind, minR, maxR)
 		for attempt = 1, 40 do
 			local minDist = attempt <= 30 and CONFIG.ItemMinDistance or CONFIG.ItemMinDistance * 0.5
@@ -1344,7 +1361,7 @@ local function spawnItems()
 		return false
 	end
 
-	-- Flare Gun и флеры гарантированно есть, но не вплотную друг к другу
+	-- the Flare Gun and flares are guaranteed, but not right next to each other
 	place("flaregun", 20, 60)
 	place("flares", 40, 110)
 
@@ -1362,7 +1379,7 @@ fireFlare = function()
 	if killing then return end
 	if not hasFlareGun then return end
 	if flares <= 0 then
-		showToast("Нет флеров")
+		showToast("No flares")
 		return
 	end
 	if now - lastFlare < CONFIG.FlareReload then return end
@@ -1428,7 +1445,7 @@ fireFlare = function()
 		pos = hit.Position + hit.Normal * 0.3
 		ball.CFrame = CFrame.new(pos)
 
-		-- оглушение монстра
+		-- stunning the monster
 		local m = currentMonster
 		local stunTime = 0
 		if m and hit.Instance:IsDescendantOf(m.model) then
@@ -1444,7 +1461,7 @@ fireFlare = function()
 		end
 		if stunTime > 0 then stunMonster(stunTime) end
 
-		-- флер горит и мерцает
+		-- the flare burns and flickers
 		task.spawn(function()
 			local t0 = os.clock()
 			while ball.Parent and os.clock() - t0 < CONFIG.FlareBurnTime do
@@ -1461,7 +1478,7 @@ fireFlare = function()
 end
 
 ------------------------------------------------------------
--- ЗРЕНИЕ МОНСТРА
+-- MONSTER VISION
 ------------------------------------------------------------
 local function hasLineOfSight(fromPos, targetChar, monsterModel)
 	local params = RaycastParams.new()
@@ -1476,8 +1493,8 @@ local function hasLineOfSight(fromPos, targetChar, monsterModel)
 	return false
 end
 
--- видит только в конусе MonsterFOV перед собой, в пределах дальности и без преград.
--- Если фонарик включён, дальность зрения умножается на FlashlightSightMultiplier.
+-- sees only inside the MonsterFOV cone ahead, within range and with no obstacles.
+-- If the flashlight is on, the sight range is multiplied by FlashlightSightMultiplier.
 local function canSee(root, target, model)
 	local toPlayer = target.hrp.Position - root.Position
 	local flat = Vector3.new(toPlayer.X, 0, toPlayer.Z)
@@ -1498,18 +1515,18 @@ local function canSee(root, target, model)
 end
 
 ------------------------------------------------------------
--- ЛОГИКА МОНСТРА
---   patrol -> увидел игрока:
---       игрок смотрит на монстра  -> chase  (бежит и бьёт)
---       игрок смотрит в другую сторону -> stalk (садится на корточки и крадётся за спиной)
---   stalk  -> игрок обернулся и увидел монстра -> strike (бросок) -> смерть, если не оглушить флером
---   chase  -> игрок отвернулся -> stalk
---   потерял из виду -> search -> patrol
--- плюс оглушение флером и сцена убийства
+-- MONSTER LOGIC
+--   patrol -> sees the player:
+--       player looks at the monster -> chase (runs and hits)
+--       player looks elsewhere -> stalk (crouches and creeps up behind)
+--   stalk  -> player turns around and sees the monster -> strike (lunge) -> death unless stunned with a flare
+--   chase  -> player looks away -> stalk
+--   lost sight -> search -> patrol
+-- plus flare stun, teleport, decoy (fake player) and the kill scene
 ------------------------------------------------------------
 local stalkWarned = false
 
--- видит ли игрок монстра (в кадре и без преград)
+-- does the player see the monster (on screen and unobstructed)
 local function playerSeesMonster(model, root)
 	local origin = camera.CFrame.Position
 	local params = RaycastParams.new()
@@ -1529,12 +1546,264 @@ local function playerSeesMonster(model, root)
 	return false
 end
 
-local function runMonster()
-	local spawnPos = getMonsterSpawn()
+------------------------------------------------------------
+-- DECOY: the monster disguises itself as an ordinary player in front of you.
+-- It jumps twice (or spins). If you come close, the "player" convulses, its head
+-- twists around, the body bursts open and the monster climbs out and chases you.
+------------------------------------------------------------
+local pendingDecoyPoint = nil
+
+local DECOY_NAMES = {"xX_Gamer_Xx", "Noob_2008", "RobloxFan_17", "BuilderBro", "Guest_8841", "CoolKid_99", "Player_4821"}
+
+-- ground point in front of the player (inside the camera's view, with a clear line of sight)
+local function getPointInFront(distance)
+	local tgt = getTarget()
+	if not tgt then return nil end
+
+	local look = camera.CFrame.LookVector
+	local flat = Vector3.new(look.X, 0, look.Z)
+	if flat.Magnitude < 0.1 then flat = tgt.hrp.CFrame.LookVector end
+	flat = flat.Unit
+
+	local ignore = {tgt.char}
+	if itemsFolder then table.insert(ignore, itemsFolder) end
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = ignore
+
+	local overlap = OverlapParams.new()
+	overlap.FilterType = Enum.RaycastFilterType.Exclude
+	overlap.FilterDescendantsInstances = ignore
+
+	local camPos = camera.CFrame.Position
+	for _ = 1, 24 do
+		local ang = (math.random() * 2 - 1) * math.rad(25)
+		local dir = CFrame.Angles(0, ang, 0):VectorToWorldSpace(flat)
+		local d = distance * (0.85 + math.random() * 0.3)
+		local p0 = tgt.hrp.Position + dir * d
+		local hit = workspace:Raycast(Vector3.new(p0.X, tgt.hrp.Position.Y + 6, p0.Z), Vector3.new(0, -80, 0), rayParams)
+		if hit and hit.Normal.Y > 0.85 and hit.Instance.CanCollide and hit.Material ~= Enum.Material.Water then
+			local pos = hit.Position
+			if #workspace:GetPartBoundsInRadius(pos + Vector3.new(0, 4, 0), 3, overlap) == 0 then
+				local eye = pos + Vector3.new(0, 3, 0)
+				-- the player must be able to see the spot
+				if workspace:Raycast(camPos, eye - camPos, rayParams) == nil then
+					return pos
+				end
+			end
+		end
+	end
+	return nil
+end
+
+-- a plain blocky "player" with a fake name tag
+local function buildDecoy()
+	local skins = {Color3.fromRGB(245, 205, 48), Color3.fromRGB(234, 184, 146), Color3.fromRGB(204, 142, 105)}
+	local shirts = {Color3.fromRGB(13, 105, 172), Color3.fromRGB(196, 40, 28), Color3.fromRGB(75, 151, 75), Color3.fromRGB(245, 205, 48)}
+	local pantsList = {Color3.fromRGB(40, 127, 71), Color3.fromRGB(16, 42, 220), Color3.fromRGB(80, 80, 80)}
+	local skin = skins[math.random(1, #skins)]
+	local shirt = shirts[math.random(1, #shirts)]
+	local pants = pantsList[math.random(1, #pantsList)]
+
+	local model = Instance.new("Model")
+	model.Name = "HorrorDecoy"
+
+	local function dpart(name, size, color)
+		local p = Instance.new("Part")
+		p.Name = name
+		p.Size = size
+		p.Color = color
+		p.Material = Enum.Material.SmoothPlastic
+		p.CanCollide = false
+		p.Massless = true
+		p.TopSurface = Enum.SurfaceType.Smooth
+		p.BottomSurface = Enum.SurfaceType.Smooth
+		p.Parent = model
+		return p
+	end
+
+	local function djoint(p0, p1, c0, c1)
+		local m = Instance.new("Motor6D")
+		m.Name = p1.Name
+		m.Part0 = p0
+		m.Part1 = p1
+		m.C0 = c0
+		m.C1 = c1 or CFrame.new()
+		m.Parent = p0
+		return m
+	end
+
+	local root = Instance.new("Part")
+	root.Name = "HumanoidRootPart"
+	root.Size = Vector3.new(2, 2, 1)
+	root.Transparency = 1
+	root.CanCollide = true
+	root.Parent = model
+
+	local torso = dpart("Torso", Vector3.new(2, 2, 1), shirt)
+	djoint(root, torso, CFrame.new())
+
+	local head = dpart("Head", Vector3.new(1.2, 1.2, 1.2), skin)
+	local headPos = CFrame.new(0, 1, 0)
+	local jHead = djoint(torso, head, headPos, CFrame.new(0, -0.6, 0))
+	for _, side in ipairs({-1, 1}) do
+		local eye = dpart("Eye", Vector3.new(0.22, 0.22, 0.1), Color3.new(0, 0, 0))
+		djoint(head, eye, CFrame.new(side * 0.27, 0.12, -0.62))
+	end
+	local mouth = dpart("Mouth", Vector3.new(0.55, 0.1, 0.1), Color3.new(0, 0, 0))
+	djoint(head, mouth, CFrame.new(0, -0.25, -0.62))
+
+	local arms, legs = {}, {}
+	for _, side in ipairs({-1, 1}) do
+		local arm = dpart(side < 0 and "Left Arm" or "Right Arm", Vector3.new(1, 2, 1), skin)
+		local armPos = CFrame.new(side * 1.5, 1, 0)
+		arms[side] = {joint = djoint(torso, arm, armPos, CFrame.new(0, 1, 0)), pos = armPos}
+
+		local leg = dpart(side < 0 and "Left Leg" or "Right Leg", Vector3.new(1, 2, 1), pants)
+		local legPos = CFrame.new(side * 0.5, -1, 0)
+		legs[side] = {joint = djoint(torso, leg, legPos, CFrame.new(0, 1, 0)), pos = legPos}
+	end
+
+	local humanoid = Instance.new("Humanoid")
+	humanoid.RigType = Enum.HumanoidRigType.R15
+	humanoid.HipHeight = 2
+	humanoid.WalkSpeed = 16
+	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+	humanoid.Parent = model
+
+	-- fake name tag so it looks like another player
+	local tag = new("BillboardGui", {
+		Size = UDim2.fromOffset(140, 24),
+		StudsOffset = Vector3.new(0, 1.9, 0),
+		AlwaysOnTop = false,
+		MaxDistance = 120,
+	}, head)
+	new("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Text = DECOY_NAMES[math.random(1, #DECOY_NAMES)],
+		Font = Enum.Font.SourceSansBold,
+		TextSize = 18,
+		TextColor3 = Color3.new(1, 1, 1),
+		TextStrokeTransparency = 0.4,
+	}, tag)
+
+	model.PrimaryPart = root
+	return {model = model, root = root, humanoid = humanoid, head = jHead, headPos = headPos, arms = arms, legs = legs}
+end
+
+-- returns {pos, lookAt} if the player got close (the monster emerges there), or nil
+local function runDecoy(pos)
+	local d = buildDecoy()
+	local tgt0 = getTarget()
+	local faceAt = tgt0 and Vector3.new(tgt0.hrp.Position.X, pos.Y + 3.2, tgt0.hrp.Position.Z) or (pos + Vector3.new(0, 3.2, -10))
+	d.model.Parent = workspace
+	d.model:PivotTo(CFrame.lookAt(pos + Vector3.new(0, 3.2, 0), faceAt))
+
+	local mode = math.random() < 0.5 and "jump" or "spin"
+	local startT = os.clock()
+	local nextJump = startT + 1.2
+	local jumpCount = 0
+	local armsAngle = 0.05
+
+	local conn = RunService.Heartbeat:Connect(function(dt)
+		if not d.root.Parent then return end
+		local airborne = d.humanoid.FloorMaterial == Enum.Material.Air
+		local armTarget, legTarget = 0.05, 0
+		if mode == "spin" then
+			d.root.CFrame = d.root.CFrame * CFrame.Angles(0, dt * 7, 0)
+			armTarget = 1.5
+		elseif airborne then
+			armTarget, legTarget = 2.6, 0.35
+		end
+		armsAngle += (armTarget - armsAngle) * math.min(dt * 14, 1)
+		for _, side in ipairs({-1, 1}) do
+			d.arms[side].joint.C0 = d.arms[side].pos * CFrame.Angles(0, 0, side * armsAngle)
+			d.legs[side].joint.C0 = d.legs[side].pos * CFrame.Angles(0, 0, side * legTarget)
+		end
+	end)
+
+	local result = nil
+	while d.model.Parent do
+		local now = os.clock()
+		local tgt = getTarget()
+		if not tgt then break end
+		local dist = flatDist(tgt.hrp.Position, d.root.Position)
+
+		if dist <= CONFIG.DecoyTriggerDistance then
+			result = {pos = pos, lookAt = tgt.hrp.Position}
+			break
+		end
+		if now - startT > CONFIG.DecoyLifetime or dist > CONFIG.TeleportTriggerDistance then
+			break
+		end
+
+		-- jump twice, pause, repeat
+		if mode == "jump" and now >= nextJump then
+			d.humanoid.Jump = true
+			jumpCount += 1
+			nextJump = now + (jumpCount % 2 == 1 and 0.9 or 2.4)
+		end
+		task.wait(0.05)
+	end
+
+	conn:Disconnect()
+
+	if not result then
+		d.model:Destroy()
+		return nil
+	end
+
+	-- reveal: the "player" convulses and its head twists around backwards
+	onSpotted()
+	if scareSnd then scareSnd:Play() end
+	local rootCF = d.root.CFrame
+	local t0 = os.clock()
+	while os.clock() - t0 < 1.0 and d.model.Parent do
+		local t = os.clock() - t0
+		RunService.Heartbeat:Wait()
+		d.root.CFrame = rootCF * CFrame.new((math.random() - 0.5) * 0.35, 0, (math.random() - 0.5) * 0.35)
+		d.head.C0 = d.headPos * CFrame.Angles(0, math.min(t / 0.6, 1) * math.pi, 0)
+		for _, side in ipairs({-1, 1}) do
+			d.arms[side].joint.C0 = d.arms[side].pos * CFrame.Angles(0, 0, side * 0.05)
+		end
+		staticBurst = 1
+		shake = math.max(shake, 0.4)
+	end
+
+	-- the shell bursts open: every part flies apart
+	if hitSnd then hitSnd:Play() end
+	for _, obj in ipairs(d.model:GetDescendants()) do
+		if obj:IsA("Motor6D") then obj:Destroy() end
+	end
+	d.humanoid:Destroy()
+	d.root:Destroy()
+	for _, obj in ipairs(d.model:GetChildren()) do
+		if obj:IsA("BasePart") then
+			obj.CanCollide = true
+			obj.Massless = false
+			obj.AssemblyLinearVelocity = Vector3.new(math.random(-18, 18), math.random(18, 34), math.random(-18, 18))
+			obj.AssemblyAngularVelocity = Vector3.new(math.random(-10, 10), math.random(-10, 10), math.random(-10, 10))
+		end
+	end
+	local model = d.model
+	task.delay(5, function()
+		if model.Parent then model:Destroy() end
+	end)
+
+	return result
+end
+
+local function runMonster(opts)
+	local emerge = opts and opts.emerge
+	local spawnPos = emerge and (emerge.pos + Vector3.new(0, -30, 0)) or getMonsterSpawn()
 	if not spawnPos then return false end
 
 	local m = buildMonster()
 	local model, humanoid, root = m.model, m.humanoid, m.root
+	if emerge then root.Anchored = true end
 	model.Parent = workspace
 	model:PivotTo(CFrame.new(spawnPos))
 	local me = {model = model, root = root, stunUntil = 0, state = "patrol"}
@@ -1544,7 +1813,7 @@ local function runMonster()
 	local state = "patrol"
 	local lastSeenPos, lastSeenT = nil, -math.huge
 	local searchStarted = 0
-	local scanUntil = 0          -- пока now < scanUntil, монстр стоит и осматривается
+	local scanUntil = 0          -- while now < scanUntil the monster stands still and looks around
 	local dest, destSet = nil, 0
 	local attackT, lastAttack = 0, 0
 	local lastRoar, lastSpot = -math.huge, -math.huge
@@ -1553,6 +1822,9 @@ local function runMonster()
 	local seenFor, unseenFor = 0, 0
 	local strikeAt = 0
 	local lastTick = os.clock()
+	local lastTeleport = -math.huge
+	local wantDecoy = false
+	local nextDecoyAt = os.clock() + math.random(CONFIG.DecoyMinInterval, CONFIG.DecoyMaxInterval)
 
 	-- pathfinding
 	local waypoints, wpIndex, pathGoal, pathTime = nil, 1, nil, 0
@@ -1594,7 +1866,7 @@ local function runMonster()
 		return true
 	end
 
-	-- анимация, осмотр на месте и поворот лицом к игроку, когда крадётся за спиной
+	-- animation, looking around, and turning to face the player while creeping behind
 	local acc = 0
 	local conn = RunService.Heartbeat:Connect(function(dt)
 		acc += dt
@@ -1624,7 +1896,7 @@ local function runMonster()
 		attackT = math.max(0, attackT - step)
 	end)
 
-	-- СЦЕНА УБИЙСТВА: монстр бросается к игроку, камера смотрит ему в пасть
+	-- KILL SCENE: the monster lunges at the player, the camera looks into its mouth
 	local function killSequence(target)
 		killing = true
 		setInventory(false)
@@ -1674,20 +1946,20 @@ local function runMonster()
 			local t = os.clock() - t0
 			if t >= total then break end
 
-			-- рывок вперёд
+			-- lunge forward
 			local a = math.clamp(t / 0.7, 0, 1)
 			a = a * a * (3 - 2 * a)
 			local p = startPos:Lerp(endPos, a)
 			root.CFrame = CFrame.lookAt(p, playerFlat)
 
-			-- камера смотрит на голову монстра, тряска нарастает, игрок отшатывается
+			-- camera looks at the monster's head, shaking grows, the player recoils
 			local lookTarget = (mhead and mhead.Position) or (p + Vector3.new(0, 8, 0))
 			local shakeAmt = 0.05 + t * 0.35
 			local jitter = Vector3.new(math.random() - 0.5, math.random() - 0.5, math.random() - 0.5) * shakeAmt
 			camera.CFrame = CFrame.lookAt(eyePos - dir * (t * 0.25) + jitter * 0.4, lookTarget + jitter)
 			camera.FieldOfView = 75 - a * 18 + math.sin(t * 40) * (t * 1.5)
 
-			-- фонарик бешено мигает, на экране помехи
+			-- flashlight flickers wildly, static on screen
 			if math.random() < 0.6 then flickerUntil = os.clock() + math.random() * 0.12 end
 			staticBurst = 1
 
@@ -1718,6 +1990,47 @@ local function runMonster()
 	end
 
 
+	-- EMERGE: the monster climbs out of the burst "player" body and starts chasing
+	local function emergeSequence()
+		state = "emerge"
+		local S = CONFIG.MonsterScale
+		local gy = emerge.pos.Y
+		local crouchY = gy + 6.2 * S    -- root height while crouched ((5.2 + 1) * S)
+		local standY = gy + 10.1 * S    -- root height while standing ((9.1 + 1) * S)
+		local hideY = crouchY - 14 * S  -- whole body hidden under the floor
+		local px, pz = emerge.pos.X, emerge.pos.Z
+		local total = 3.0
+		local t0 = os.clock()
+		if m.roar then
+			m.roar.PlaybackSpeed = 0.28
+			m.roar:Play()
+		end
+		while model.Parent do
+			RunService.Heartbeat:Wait()
+			local t = os.clock() - t0
+			if t >= total then break end
+			local y
+			if t < 2.0 then
+				local a = t / 2.0
+				a = a * a * (3 - 2 * a)
+				y = hideY + (crouchY - hideY) * a
+			else
+				state = "chase" -- stands up while the chase pose takes over
+				local a = (t - 2.0) / (total - 2.0)
+				a = a * a * (3 - 2 * a)
+				y = crouchY + (standY - crouchY) * a
+			end
+			root.CFrame = CFrame.lookAt(Vector3.new(px, y, pz), Vector3.new(emerge.lookAt.X, y, emerge.lookAt.Z))
+			staticBurst = math.max(staticBurst, 0.5)
+			shake = math.max(shake, 0.25)
+		end
+		root.Anchored = false
+		state = "chase"
+		lastSeenT = os.clock()
+		local tgt = getTarget()
+		lastSeenPos = tgt and tgt.hrp.Position or root.Position
+	end
+
 	local function enterChase(now)
 		state = "chase"
 		scanUntil = 0
@@ -1740,7 +2053,7 @@ local function runMonster()
 		waypoints = nil
 		if not stalkWarned then
 			stalkWarned = true
-			showToast("Что-то крадётся за спиной. Не оборачивайся без флера!")
+			showToast("Something is creeping behind you. Don't turn around without a flare!")
 		end
 	end
 
@@ -1755,13 +2068,15 @@ local function runMonster()
 		onSpotted()
 	end
 
+	if emerge then emergeSequence() end
+
 	while model.Parent and root.Parent do
 		local now = os.clock()
 		local tickDt = now - lastTick
 		lastTick = now
 		me.state = state
 
-		-- игрок возродился -> монстр уходит на новое место
+		-- player respawned -> the monster moves to a new place
 		if monsterNeedsReset then
 			monsterNeedsReset = false
 			local p = getMonsterSpawn()
@@ -1769,7 +2084,7 @@ local function runMonster()
 			state, scanUntil, dest, waypoints = "patrol", 0, nil, nil
 		end
 
-		-- оглушён флером: стоит, закрывает лицо руками
+		-- stunned by a flare: stands still, covers its face with its hands
 		if now < me.stunUntil then
 			if not wasStunned then
 				wasStunned = true
@@ -1799,8 +2114,8 @@ local function runMonster()
 
 		local target = getTarget()
 		local fdist = target and flatDist(target.hrp.Position, root.Position) or math.huge
-		local sawNow = target ~= nil and canSee(root, target, model)   -- монстр видит игрока (конус 70°)
-		local seen = target ~= nil and playerSeesMonster(model, root)  -- игрок видит монстра
+		local sawNow = target ~= nil and canSee(root, target, model)   -- the monster sees the player (70° cone)
+		local seen = target ~= nil and playerSeesMonster(model, root)  -- the player sees the monster
 
 		if seen then
 			seenFor += tickDt
@@ -1814,7 +2129,39 @@ local function runMonster()
 			lastSeenT = now
 		end
 
-		-- переходы между состояниями
+		-- teleport: if the player got too far away, jump to a point TeleportDistance from the player
+		if target and fdist > CONFIG.TeleportTriggerDistance and now - lastTeleport > CONFIG.TeleportCooldown then
+			lastTeleport = now
+			local c = target.hrp.Position
+			local pick
+			for _ = 1, 6 do
+				local pt = randomMapPoint(CONFIG.TeleportDistance - 10, CONFIG.TeleportDistance + 10, c)
+				if pt then
+					pick = pt
+					if canReach(c, pt) then break end
+				end
+			end
+			if pick then
+				model:PivotTo(CFrame.new(pick + Vector3.new(0, 9, 0)))
+				root.AssemblyLinearVelocity = Vector3.zero
+				state, scanUntil, dest, waypoints = "patrol", 0, nil, nil
+				fdist = flatDist(c, root.Position)
+				sawNow, seen = false, false
+			end
+		end
+
+		-- decoy: sometimes the monster disguises itself as an ordinary player in front of you
+		if state == "patrol" and target and now >= nextDecoyAt and fdist > 40 then
+			local dp = getPointInFront(CONFIG.DecoyDistance)
+			if dp then
+				pendingDecoyPoint = dp
+				wantDecoy = true
+				break
+			end
+			nextDecoyAt = now + 10
+		end
+
+		-- state transitions
 		if state == "patrol" or state == "search" then
 			if sawNow then
 				if seen then enterChase(now) else enterStalk() end
@@ -1824,7 +2171,7 @@ local function runMonster()
 				state = "patrol"
 				dest, waypoints = nil, nil
 			elseif sawNow and unseenFor > 0.35 then
-				enterStalk() -- игрок отвернулся: монстр садится и крадётся за спиной
+				enterStalk() -- player looked away: the monster crouches and creeps up behind
 			elseif not sawNow and now - lastSeenT > CONFIG.MonsterSightMemory then
 				state = "search"
 				searchStarted = now
@@ -1836,7 +2183,7 @@ local function runMonster()
 				state = "patrol"
 				dest, waypoints = nil, nil
 			elseif seenFor >= 0.1 then
-				-- игрок обернулся и увидел монстра
+				-- the player turned around and saw the monster
 				if fdist <= CONFIG.StalkStrikeRange then
 					enterStrike(now)
 				else
@@ -1850,7 +2197,7 @@ local function runMonster()
 			end
 		end
 
-		-- поведение в текущем состоянии
+		-- behavior in the current state
 		if state == "chase" then
 			humanoid.WalkSpeed = (sawNow and fdist < 35) and CONFIG.MonsterLungeSpeed or CONFIG.MonsterChaseSpeed
 			if sawNow then
@@ -1873,7 +2220,7 @@ local function runMonster()
 			end
 
 		elseif state == "stalk" then
-			-- крадётся на корточках за спиной и держит дистанцию
+			-- creeps crouched behind you and keeps its distance
 			humanoid.WalkSpeed = CONFIG.MonsterStalkSpeed
 			if target then
 				if fdist > CONFIG.StalkDistance + 2 then
@@ -1888,7 +2235,7 @@ local function runMonster()
 			end
 
 		elseif state == "strike" then
-			-- бросок: у игрока есть StrikeWindup секунд, чтобы выстрелить флером
+			-- lunge: the player has StrikeWindup seconds to fire a flare
 			humanoid.WalkSpeed = CONFIG.MonsterLungeSpeed
 			if not target then
 				state = "patrol"
@@ -1937,7 +2284,7 @@ local function runMonster()
 			end
 		end
 
-		-- застрял — прыгаем и ищем другой путь
+		-- stuck: jump and look for another path
 		if os.clock() - lastPosTime > 1.5 then
 			local standing = os.clock() < scanUntil
 				or (state == "stalk" and fdist <= CONFIG.StalkDistance + 2)
@@ -1958,17 +2305,18 @@ local function runMonster()
 	conn:Disconnect()
 	currentMonster = nil
 	if model.Parent then model:Destroy() end
+	if wantDecoy then return "decoy" end
 	return true
 end
 
 ------------------------------------------------------------
--- 6. ГЛАВНЫЙ ЦИКЛ
+-- 6. MAIN LOOP
 ------------------------------------------------------------
 RunService.RenderStepped:Connect(function(dt)
 	local now = os.clock()
 	camera = workspace.CurrentCamera
 
-	-- близость монстра
+	-- monster proximity
 	local target = 0
 	local monsterDist = math.huge
 	if currentMonster and currentMonster.root.Parent then
@@ -1981,7 +2329,7 @@ RunService.RenderStepped:Connect(function(dt)
 	shake = math.max(0, shake - dt * 1.2)
 	eff = math.clamp(intensity + staticBurst, 0, 1)
 
-	-- бег, выносливость, покачивание головы
+	-- sprint, stamina, head bob
 	local character = player.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	local sprinting = false
@@ -2031,7 +2379,7 @@ RunService.RenderStepped:Connect(function(dt)
 	fov += ((sprinting and 84 or 75) - fov) * math.min(dt * 6, 1)
 	if not killing then camera.FieldOfView = fov end
 
-	-- шаги игрока (отключаем стандартные, ставим свои с учётом поверхности и бега)
+	-- player footsteps (default ones disabled; custom ones depend on surface and sprinting)
 	if stepSnd then
 		local rootPart = humanoid and humanoid.RootPart
 		local running = rootPart and rootPart:FindFirstChild("Running")
@@ -2048,9 +2396,9 @@ RunService.RenderStepped:Connect(function(dt)
 				local vol, pitch = 0.6, 1.0
 				if mat == Enum.Material.Grass or mat == Enum.Material.LeafyGrass or mat == Enum.Material.Ground
 					or mat == Enum.Material.Mud or mat == Enum.Material.Sand or mat == Enum.Material.Snow then
-					vol, pitch = 0.45, 0.85       -- мягкая земля и трава
+					vol, pitch = 0.45, 0.85       -- soft ground and grass
 				elseif mat == Enum.Material.Wood or mat == Enum.Material.WoodPlanks then
-					vol, pitch = 0.9, 1.1         -- скрипучий деревянный пол в домах
+					vol, pitch = 0.9, 1.1         -- creaky wooden floors
 				elseif mat == Enum.Material.Slate or mat == Enum.Material.Concrete or mat == Enum.Material.Rock
 					or mat == Enum.Material.Cobblestone or mat == Enum.Material.Metal then
 					vol, pitch = 0.8, 1.0
@@ -2066,18 +2414,18 @@ RunService.RenderStepped:Connect(function(dt)
 		if stepSnd.Playing ~= walking then stepSnd.Playing = walking end
 	end
 
-	-- строка состояния в инвентаре
+	-- status line in the inventory
 	if invOpen then
 		local hp = humanoid and math.floor(humanoid.Health) or 0
 		local maxHp = humanoid and math.floor(humanoid.MaxHealth) or 0
-		invFooter.Text = string.format("HP %d/%d     Выносливость %d%%", hp, maxHp, math.floor(stamina * 100))
+		invFooter.Text = string.format("HP %d/%d     Stamina %d%%", hp, maxHp, math.floor(stamina * 100))
 	end
 
 	staminaBack.Visible = stamina < 0.999
 	staminaFill.Size = UDim2.fromScale(stamina, 1)
 	staminaFill.BackgroundColor3 = exhausted and Color3.fromRGB(220, 60, 60) or Color3.new(1, 1, 1)
 
-	-- фонарик: мерцает, когда монстр близко
+	-- flashlight: flickers when the monster is near
 	flickerCheck -= dt
 	if flickerCheck <= 0 then
 		flickerCheck = 0.25
@@ -2091,7 +2439,7 @@ RunService.RenderStepped:Connect(function(dt)
 	flashCF = flashCF:Lerp(camera.CFrame, math.clamp(dt * 40, 0, 1))
 	lightPart.CFrame = flashCF
 
-	-- пост-эффекты
+	-- post effects
 	blur.Size = 1.2 + eff * 5
 	cc.Saturation = -0.35 - eff * 0.4
 	cc.Contrast = 0.25 + eff * 0.2
@@ -2124,7 +2472,7 @@ RunService.RenderStepped:Connect(function(dt)
 		timeLabel.Text = string.format("%02d:%02d:%02d", math.floor(s / 3600), math.floor(s / 60) % 60, s % 60)
 	end
 
-	-- сердцебиение
+	-- heartbeat
 	if beat then
 		beatT -= dt
 		if beatT <= 0 then
@@ -2141,7 +2489,7 @@ RunService.RenderStepped:Connect(function(dt)
 end)
 
 ------------------------------------------------------------
--- ЗАПУСК: раскладываем предметы вокруг и запускаем монстра (без телепортов)
+-- START: scatter the items around and start the monster (no teleporting you around)
 ------------------------------------------------------------
 task.spawn(function()
 	local ch = player.Character or player.CharacterAdded:Wait()
@@ -2151,14 +2499,20 @@ task.spawn(function()
 
 	spawnItems()
 
-	-- после смерти монстр уходит на новое место рядом с твоим новым спавном
+	-- after you die the monster moves to a new place near your new spawn
 	player.CharacterAdded:Connect(function()
 		monsterNeedsReset = true
 	end)
 
+	local opts = nil
 	while true do
-		local ok = runMonster()
-		if not ok then
+		local result = runMonster(opts)
+		opts = nil
+		if result == "decoy" then
+			-- the monster is disguised as a player; when you come close it emerges
+			local info = runDecoy(pendingDecoyPoint)
+			if info then opts = {emerge = info} end
+		elseif not result then
 			task.wait(2)
 		else
 			task.wait(CONFIG.MonsterRespawnTime)
