@@ -1,4 +1,4 @@
---// HORROR MODE V9 - single LocalScript (client-side) with a lobby hub
+--// HORROR MODE V10 - single LocalScript (client-side) with a lobby hub
 --//
 --// Where to put it: StarterPlayer -> StarterPlayerScripts -> LocalScript
 --// (or run it with an executor - the script does not use anything from Explorer).
@@ -34,7 +34,7 @@ if not player then return end
 local playerGui = player:WaitForChild("PlayerGui")
 
 local CONFIG = {
-	Version = "9.0",
+	Version = "10.0",
 
 	-- ======================= MASTER SWITCHES (false = the feature is fully off) =======================
 	Features = {
@@ -60,6 +60,8 @@ local CONFIG = {
 		PlayerFootsteps = true,
 		Heartbeat = true,
 		Sprint = true,
+		FlashlightFX = true,     -- layered beam, bounce light, dust in the beam, held flashlight model
+		PlayerCrawl = true,      -- crawl mode for the player (stealth)
 	},
 
 	-- ======================= PERFORMANCE =======================
@@ -67,12 +69,25 @@ local CONFIG = {
 	AutoQuality = true,          -- lower the quality automatically if the frame rate drops
 	AutoQualityFps = 28,
 	QualityPresets = {
-		High   = {Scanlines = 6, Dots = 70, Shadows = true,  Bloom = true,  NoiseRate = 0.05}, -- Scanlines = line spacing in pixels (0 = off)
-		Medium = {Scanlines = 9, Dots = 40, Shadows = true,  Bloom = true,  NoiseRate = 0.08},
-		Low    = {Scanlines = 0, Dots = 15, Shadows = false, Bloom = false, NoiseRate = 0.15},
+		High   = {Scanlines = 6, Dots = 70, Shadows = true,  Bloom = true,  NoiseRate = 0.05, Layers = 5, Bounce = true,  Dust = 25, AmbientDust = 14}, -- Scanlines = line spacing in pixels (0 = off)
+		Medium = {Scanlines = 9, Dots = 40, Shadows = true,  Bloom = true,  NoiseRate = 0.08, Layers = 4, Bounce = true,  Dust = 16, AmbientDust = 8},
+		Low    = {Scanlines = 0, Dots = 15, Shadows = false, Bloom = false, NoiseRate = 0.15, Layers = 3, Bounce = false, Dust = 6,  AmbientDust = 0},
 	},
 
 	FirstPerson = true,
+
+	-- flashlight look (Layers/Bounce/Dust per quality level are in QualityPresets)
+	FlashlightFX = {Brightness = 7, Bounce = 1.0},
+
+	-- player crawl mode (key C): slow, low camera, quiet, and much harder for the monster to see you
+	CrawlKey = Enum.KeyCode.C,
+	PlayerCrawlSpeed = 6,
+	CrawlCameraDrop = 2.4,
+	CrawlSightMultiplier = 0.45,
+
+	-- debug keys: [M] summons the mimic right now (useful to test it)
+	DebugKeys = true,
+	DecoyDebugKey = Enum.KeyCode.M,
 	StopKey = Enum.KeyCode.End,  -- quit to the lobby
 
 	Lobby = {Origin = Vector3.new(0, 5000, 0), Trees = 90},
@@ -112,7 +127,7 @@ local CONFIG = {
 
 	-- the fake player appears in front of you when the monster loses you after running this long
 	DecoyAfterChaseSeconds = 10,
-	DecoyRandom = false,         -- also spawn decoys at random times (DecoyMinInterval..DecoyMaxInterval)
+	DecoyRandom = true,          -- also spawn the mimic at random times (DecoyMinInterval..DecoyMaxInterval)
 
 	-- Atmosphere
 	FogEnd = 80,                 -- lower = thicker fog
@@ -160,8 +175,8 @@ local CONFIG = {
 	TeleportCooldown = 6,
 
 	-- Decoy: the monster disguises itself as an ordinary player in front of you
-	DecoyMinInterval = 45,         -- seconds between decoys (random between min and max)
-	DecoyMaxInterval = 90,
+	DecoyMinInterval = 80,         -- seconds between random mimics (random between min and max)
+	DecoyMaxInterval = 160,
 	DecoyDistance = 55,            -- how far in front of you the fake player appears
 	DecoyTriggerDistance = 22,     -- come closer than this and the monster bursts out
 	DecoyLifetime = 70,            -- the decoy disappears after this many seconds if ignored
@@ -765,9 +780,9 @@ end
 -- Buttons: PLAY (starts the game) and STOP (stops the script and deletes it).
 -- Version and the feature list are shown in the right corner.
 ------------------------------------------------------------
-local FEATURE_ORDER = {"VHSOverlay", "Flicker", "AmbientSounds", "Hallucinations", "FakeFootsteps", "ScreenGlitches",
+local FEATURE_ORDER = {"VHSOverlay", "FlashlightFX", "Flicker", "AmbientSounds", "Hallucinations", "FakeFootsteps", "ScreenGlitches",
 	"CameraShake", "Jumpscares", "KillAnimations", "AdaptiveSpeed", "Difficulty", "Stalking", "SilentBehind",
-	"CrawlAnimation", "Decoy", "Teleport", "Items", "FlareGun", "Inventory", "PlayerFootsteps", "Heartbeat", "Sprint"}
+	"CrawlAnimation", "Decoy", "Teleport", "Items", "FlareGun", "Inventory", "PlayerFootsteps", "Heartbeat", "Sprint", "PlayerCrawl"}
 
 local FEATURE_LABELS = {
 	VHSOverlay = "Old camera (VHS) overlay",
@@ -792,6 +807,8 @@ local FEATURE_LABELS = {
 	PlayerFootsteps = "Player footsteps",
 	Heartbeat = "Heartbeat",
 	Sprint = "Sprint + stamina",
+	PlayerCrawl = "Player crawl mode [C]",
+	FlashlightFX = "Flashlight beam effects",
 }
 
 local Hub = {}
@@ -1052,7 +1069,7 @@ function Hub.build(callbacks)
 	new("TextLabel", {
 		AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 24, 1, -20), Size = UDim2.fromOffset(520, 60),
 		BackgroundTransparency = 1, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Bottom,
-		Text = "[F] flashlight   [Shift] sprint   [I] inventory   [G] flare gun   [E] pick up\n[H] medkit   [V] energy drink   [End] quit to lobby",
+		Text = "[F] flashlight   [Shift] sprint   [C] crawl   [I] inventory   [G] flare gun   [E] pick up\n[H] medkit   [V] energy drink   [M] summon mimic   [End] quit to lobby",
 		Font = Enum.Font.Code, TextSize = 15, TextColor3 = Color3.fromRGB(190, 195, 205), TextXAlignment = Enum.TextXAlignment.Left,
 	}, gui)
 
@@ -1151,6 +1168,7 @@ local function startGame(opts)
 	local itemRegistry = {}       -- items for the [E] pickup fallback (when ProximityPrompts are unsupported)
 	local pickupNearest = function() end
 	local lastDim = 1
+	local debugForceDecoy = false
 	local fpsT, fpsN = 0, 0
 
 	-- difficulty rises with time; Diff.get("Speed") etc. return the current multiplier
@@ -1463,6 +1481,8 @@ local noiseT, secT = 0, 0
 local startTime = os.time()
 local flashCF = camera.CFrame
 local flashOn = true
+local playerCrawl = false
+local pCrawlK = 0
 local flickerUntil = 0
 local flickerCheck = 0
 local killing = false
@@ -1652,36 +1672,191 @@ useEnergy = function()
 	refreshInventory()
 end
 
-local lightPart = new("Part", {
-	Name = "HorrorFlashlight",
-	Anchored = true,
-	CanCollide = false,
-	CanQuery = false,
-	CanTouch = false,
-	Transparency = 1,
-	Size = Vector3.new(0.2, 0.2, 0.2),
-}, nil, true)
-lightPart.Parent = camera
+------------------------------------------------------------
+-- FLASHLIGHT (visual system, client-side)
+--   * five stacked spotlights give a hot center that falls off smoothly (no hard edge)
+--   * a bounce light follows the spot on the wall: the light "spills" onto the surroundings
+--   * dust floats through the beam, plus faint dust in the air that only shows where the light touches
+--   * a flashlight model is held in your hand and the beam starts at its lens
+--   * the light warms up when switched on and the filament shimmers slightly
+------------------------------------------------------------
+local FXC = CONFIG.FlashlightFX
+local Torch = {
+	level = 0, t = 0, viewCF = camera.CFrame, bouncePos = nil, rayT = 0,
+	layers = {}, viewParts = {}, attached = {}, layerCount = 5, bounceAllowed = true, lensOn = false,
+	rayParams = RaycastParams.new(),
+}
+Torch.rayParams.FilterType = Enum.RaycastFilterType.Exclude
 
-local spot = new("SpotLight", {
-	Face = Enum.NormalId.Front,
-	Range = CONFIG.FlashlightRange,
-	Brightness = CONFIG.FlashlightBrightness,
-	Angle = CONFIG.FlashlightAngle,
-	Color = Color3.fromRGB(255, 244, 214),
-	Shadows = Q.Shadows,
-	Enabled = true,
+local function torchPart(props)
+	props.Anchored = true
+	props.CanCollide = false
+	props.CanQuery = false
+	props.CanTouch = false
+	local p = new("Part", props, nil, true)
+	p.Parent = camera
+	table.insert(Torch.attached, p)
+	return p
+end
+
+local lightPart = torchPart({Name = "HorrorFlashlight", Transparency = 1, Size = Vector3.new(0.2, 0.2, 0.2)})
+Torch.part = lightPart
+
+-- stacked spot lights, in priority order (a lower quality keeps only the first ones)
+local LAYER_DEFS = {
+	{angle = 6,  mult = 1.00, color = Color3.fromRGB(255, 252, 240), range = 1.00, shadows = true},   -- hot core
+	{angle = 18, mult = 0.50, color = Color3.fromRGB(255, 238, 200), range = 1.00, shadows = true},   -- main beam
+	{angle = 30, mult = 0.30, color = Color3.fromRGB(255, 226, 180), range = 0.85, shadows = false},  -- soft edge
+	{angle = 11, mult = 0.70, color = Color3.fromRGB(255, 246, 222), range = 1.00, shadows = false},  -- inner glow
+	{angle = 52, mult = 0.10, color = Color3.fromRGB(255, 214, 165), range = 0.55, shadows = false},  -- faint spill
+}
+for _, def in ipairs(LAYER_DEFS) do
+	local base = FXC.Brightness * def.mult
+	local light = new("SpotLight", {
+		Face = Enum.NormalId.Front,
+		Range = CONFIG.FlashlightRange * def.range,
+		Brightness = base,
+		Angle = def.angle,
+		Color = def.color,
+		Shadows = def.shadows and Q.Shadows,
+		Enabled = true,
+	}, lightPart, true)
+	table.insert(Torch.layers, {light = light, base = base, shadows = def.shadows})
+end
+
+-- dust that streams out of the lens and drifts through the beam (lit only where the light touches it)
+local dustSize = NumberSequence.new(0.05, 0.11)
+local dustFade = NumberSequence.new({
+	NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.15, 0.35),
+	NumberSequenceKeypoint.new(0.8, 0.55), NumberSequenceKeypoint.new(1, 1),
+})
+Torch.dust = safeNew("ParticleEmitter", {
+	Texture = "rbxasset://textures/particles/smoke_main.dds",
+	Rate = 25, Lifetime = NumberRange.new(2.5, 4.5), Speed = NumberRange.new(2, 7),
+	SpreadAngle = Vector2.new(14, 14), Size = dustSize, Transparency = dustFade,
+	LightInfluence = 1, LightEmission = 0, Drag = 0.6, Acceleration = Vector3.new(0, 0.2, 0),
+	RotSpeed = NumberRange.new(-30, 30), EmissionDirection = Enum.NormalId.Front, LockedToPart = false,
+	Color = ColorSequence.new(Color3.fromRGB(255, 245, 225)),
 }, lightPart, true)
 
-local core = new("SpotLight", {
-	Face = Enum.NormalId.Front,
-	Range = CONFIG.FlashlightRange,
-	Brightness = CONFIG.FlashlightCoreBrightness,
-	Angle = CONFIG.FlashlightCoreAngle,
-	Color = Color3.fromRGB(255, 246, 225),
-	Shadows = Q.Shadows,
-	Enabled = true,
-}, lightPart, true)
+-- faint dust filling the air around you
+Torch.dustBox = torchPart({Name = "HorrorDust", Transparency = 1, Size = Vector3.new(70, 30, 70)})
+Torch.ambientDust = safeNew("ParticleEmitter", {
+	Texture = "rbxasset://textures/particles/smoke_main.dds",
+	Shape = Enum.ParticleEmitterShape.Box, ShapeStyle = Enum.ParticleEmitterShapeStyle.Volume,
+	Rate = 12, Lifetime = NumberRange.new(8, 12), Speed = NumberRange.new(0.1, 0.5),
+	SpreadAngle = Vector2.new(180, 180), Size = dustSize, Transparency = dustFade,
+	LightInfluence = 1, LightEmission = 0, Drag = 0.3, Acceleration = Vector3.new(0, 0.05, 0), LockedToPart = false,
+	Color = ColorSequence.new(Color3.fromRGB(255, 240, 220)),
+}, Torch.dustBox, true)
+
+-- bounce light: a soft point light sitting on the lit surface, tinted by the surface color
+Torch.bouncePart = torchPart({Name = "HorrorFlashlightBounce", Transparency = 1, Size = Vector3.new(0.2, 0.2, 0.2)})
+Torch.bounce = new("PointLight", {Color = Color3.fromRGB(255, 236, 205), Range = 14, Brightness = 0.6, Shadows = false, Enabled = false}, Torch.bouncePart, true)
+
+-- the flashlight in your hand (axis of the cylinders points forward)
+local function viewPart(size, offset, color, material)
+	local p = torchPart({Name = "HorrorTorchModel", Size = size, Color = color, Material = material, Shape = Enum.PartType.Cylinder})
+	table.insert(Torch.viewParts, {part = p, off = offset})
+	return p
+end
+viewPart(Vector3.new(1.5, 0.34, 0.34), 0, Color3.fromRGB(22, 22, 26), Enum.Material.Metal)       -- handle
+viewPart(Vector3.new(0.55, 0.54, 0.54), 0.95, Color3.fromRGB(38, 38, 44), Enum.Material.Metal)   -- head
+viewPart(Vector3.new(0.08, 0.62, 0.62), 1.24, Color3.fromRGB(80, 80, 88), Enum.Material.Metal)   -- bezel
+Torch.lens = viewPart(Vector3.new(0.05, 0.46, 0.46), 1.28, Color3.fromRGB(255, 240, 210), Enum.Material.Neon)
+
+function Torch.setQuality(q, fxOn)
+	local layers, bounce, dustRate, ambRate, view = q.Layers, q.Bounce, q.Dust, q.AmbientDust, true
+	if not fxOn then
+		layers, bounce, dustRate, ambRate, view = math.min(layers, 2), false, 0, 0, false
+	end
+	Torch.layerCount = layers
+	Torch.bounceAllowed = bounce
+	if typeof(Torch.dust) == "Instance" then Torch.dust.Rate = dustRate end
+	if typeof(Torch.ambientDust) == "Instance" then
+		Torch.ambientDust.Rate = ambRate
+		Torch.ambientDust.Enabled = ambRate > 0
+	end
+	for _, vp in ipairs(Torch.viewParts) do vp.part.Transparency = view and 0 or 1 end
+	for _, L in ipairs(Torch.layers) do L.light.Shadows = L.shadows and q.Shadows end
+end
+
+-- called every frame by the main loop
+function Torch.update(dt, now, on, dim, moveSpeed, crawlK, monsterModel)
+	if lightPart.Parent ~= camera then
+		for _, p in ipairs(Torch.attached) do p.Parent = camera end
+	end
+	local cam = camera.CFrame
+	Torch.t += dt
+
+	-- the held light lags a little behind the camera (weight and inertia)
+	Torch.viewCF = Torch.viewCF:Lerp(cam, math.clamp(dt * 22, 0, 1))
+	local k = math.clamp(moveSpeed / 16, 0, 1.3)
+	local sway = CFrame.new(math.sin(Torch.t * 5) * 0.012 * k, math.abs(math.sin(Torch.t * 5)) * 0.02 * k, 0)
+	local handCF = Torch.viewCF * CFrame.new(0.62, -0.5, -1.1) * sway
+	local aimDir = Torch.viewCF.LookVector:Lerp(cam.LookVector, 0.6)
+	if aimDir.Magnitude < 0.01 then aimDir = cam.LookVector end
+	aimDir = aimDir.Unit
+	local lensPos = (Torch.viewCF * CFrame.new(0.55, -0.42, -1.6)).Position
+	lightPart.CFrame = CFrame.lookAt(lensPos, cam.Position + aimDir * 60)
+
+	-- warm-up when switched on, quick fade when switched off, slight filament shimmer
+	Torch.level += ((on and 1 or 0) - Torch.level) * math.min(dt * (on and 16 or 26), 1)
+	local level = Torch.level
+	local power = level * dim * (1 + math.noise(now * 9, 0.5, 0) * 0.04)
+	local enabled = level > 0.02
+	for i, L in ipairs(Torch.layers) do
+		local active = enabled and i <= Torch.layerCount
+		L.light.Enabled = active
+		if active then L.light.Brightness = L.base * power end
+	end
+
+	if typeof(Torch.dust) == "Instance" then Torch.dust.Enabled = level > 0.15 and Torch.dust.Rate > 0 end
+	Torch.dustBox.CFrame = CFrame.new(cam.Position)
+
+	-- bounce light on the surface the beam hits
+	if enabled and Torch.bounceAllowed then
+		Torch.rayT -= dt
+		if Torch.rayT <= 0 then
+			Torch.rayT = 0.25
+			local ignore = {lightPart, Torch.bouncePart, Torch.dustBox}
+			if player.Character then table.insert(ignore, player.Character) end
+			if monsterModel then table.insert(ignore, monsterModel) end
+			for _, vp in ipairs(Torch.viewParts) do table.insert(ignore, vp.part) end
+			Torch.rayParams.FilterDescendantsInstances = ignore
+		end
+		local hit = workspace:Raycast(lensPos, aimDir * CONFIG.FlashlightRange, Torch.rayParams)
+		if hit then
+			local target = hit.Position + hit.Normal * 1.4
+			Torch.bouncePos = Torch.bouncePos and Torch.bouncePos:Lerp(target, math.min(dt * 14, 1)) or target
+			Torch.bouncePart.CFrame = CFrame.new(Torch.bouncePos)
+			local dist = (hit.Position - lensPos).Magnitude
+			Torch.bounce.Range = math.clamp(6 + dist * 0.18, 8, 26)
+			Torch.bounce.Brightness = math.clamp(0.95 - dist / 180, 0.25, 0.95) * power * FXC.Bounce
+			local c = Color3.fromRGB(255, 236, 205)
+			local okC, surf = pcall(function() return hit.Instance.Color end)
+			if okC and typeof(surf) == "Color3" then c = c:Lerp(surf, 0.35) end
+			Torch.bounce.Color = c
+			Torch.bounce.Enabled = true
+		else
+			Torch.bounce.Enabled = false
+		end
+	else
+		Torch.bounce.Enabled = false
+	end
+
+	-- the flashlight model in your hand
+	local lensNow = level > 0.3
+	if lensNow ~= Torch.lensOn then
+		Torch.lensOn = lensNow
+		Torch.lens.Material = lensNow and Enum.Material.Neon or Enum.Material.Metal
+		Torch.lens.Color = lensNow and Color3.fromRGB(255, 240, 210) or Color3.fromRGB(60, 60, 64)
+	end
+	local base = handCF * CFrame.Angles(0, math.rad(90), 0)
+	for _, vp in ipairs(Torch.viewParts) do
+		vp.part.CFrame = base * CFrame.new(vp.off, 0, 0)
+	end
+end
 
 local function toggleFlashlight()
 	flashOn = not flashOn
@@ -1691,6 +1866,7 @@ end
 C(UserInputService.InputBegan, function(input, gpe)
 	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
 		sprintHeld = true
+		playerCrawl = false -- sprinting stands you up
 	end
 	if not gpe and input.KeyCode == CONFIG.FlashlightKey then
 		toggleFlashlight()
@@ -1704,6 +1880,12 @@ C(UserInputService.InputBegan, function(input, gpe)
 		useEnergy()
 	elseif not gpe and input.KeyCode == Enum.KeyCode.E and not Support.Prompts then
 		pickupNearest()
+	elseif not gpe and input.KeyCode == CONFIG.CrawlKey and FEAT.PlayerCrawl and not killing then
+		playerCrawl = not playerCrawl
+		showToast(playerCrawl and "Crawling: slow, quiet, hard to see" or "Standing up")
+	elseif not gpe and CONFIG.DebugKeys and input.KeyCode == CONFIG.DecoyDebugKey then
+		debugForceDecoy = true
+		showToast("Mimic summoned")
 	end
 end)
 C(UserInputService.InputEnded, function(input)
@@ -1745,6 +1927,10 @@ if UserInputService.TouchEnabled then
 	C(flareBtn.Activated, function() fireFlare() end)
 	local invBtn = touchButton("INV", -450)
 	C(invBtn.Activated, function() setInventory(not invOpen) end)
+	local crawlBtn = touchButton("CRAWL", -550)
+	C(crawlBtn.Activated, function()
+		if FEAT.PlayerCrawl and not killing then playerCrawl = not playerCrawl end
+	end)
 end
 
 -- FX API (base). Gameplay code only talks to the FX table; nothing in here changes gameplay state.
@@ -2735,7 +2921,7 @@ local function canSee(root, target, model)
 	local toPlayer = target.hrp.Position - root.Position
 	local flat = Vector3.new(toPlayer.X, 0, toPlayer.Z)
 	local d = flat.Magnitude
-	local range = CONFIG.MonsterSightRange * (flashOn and CONFIG.FlashlightSightMultiplier or 1) * Diff.get("Sight")
+	local range = CONFIG.MonsterSightRange * (flashOn and CONFIG.FlashlightSightMultiplier or 1) * Diff.get("Sight") * (1 - (1 - CONFIG.CrawlSightMultiplier) * pCrawlK)
 	if d > range then return false end
 	if d > 0.5 then
 		local look = root.CFrame.LookVector
@@ -2783,15 +2969,30 @@ local function playerSeesMonster(model, root)
 end
 
 ------------------------------------------------------------
--- DECOY: the monster disguises itself as an ordinary player in front of you.
--- It jumps twice (or spins). If you come close, the "player" convulses, its head
--- twists around, the body bursts open and the monster climbs out and chases you.
+-- MIMIC (decoy): the monster disguises itself as a classic "Bacon hair" noob with a random name.
+-- It jumps twice (or spins). If you come close, the noob convulses, its head twists around, its
+-- torso tears in half, the body breaks apart and the monster crawls out of the skin.
 ------------------------------------------------------------
 local pendingDecoyPoint = nil
 
-local DECOY_NAMES = {"xX_Gamer_Xx", "Noob_2008", "RobloxFan_17", "BuilderBro", "Guest_8841", "CoolKid_99", "Player_4821"}
+local NAME_ADJ = {"Cool", "Epic", "Dark", "Super", "Pro", "Mega", "Happy", "Sleepy", "Tiny", "Fast", "Lucky", "Crazy"}
+local NAME_NOUN = {"Gamer", "Builder", "Ninja", "Panda", "Wolf", "Dragon", "Noob", "Miner", "Racer", "Knight", "Cat", "Pizza"}
 
--- ground point in front of the player (inside the camera's view, with a clear line of sight)
+-- a different username every time
+local function randomName()
+	local a = NAME_ADJ[math.random(1, #NAME_ADJ)]
+	local n = NAME_NOUN[math.random(1, #NAME_NOUN)]
+	local style = math.random(1, 5)
+	if style == 1 then return a .. n .. math.random(10, 9999)
+	elseif style == 2 then return a .. "_" .. n
+	elseif style == 3 then return "xX_" .. a .. n .. "_Xx"
+	elseif style == 4 then return n .. math.random(100, 99999)
+	end
+	return a .. n .. "_" .. math.random(1, 99)
+end
+
+-- ground point in front of the player. Tries the strict version first (inside the view, clear line
+-- of sight), then relaxes the rules so the mimic can almost always find a place to appear.
 local function getPointInFront(distance)
 	local tgt = getTarget()
 	if not tgt then return nil end
@@ -2803,44 +3004,53 @@ local function getPointInFront(distance)
 
 	local ignore = {tgt.char}
 	if itemsFolder then table.insert(ignore, itemsFolder) end
-
 	local rayParams = RaycastParams.new()
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
 	rayParams.FilterDescendantsInstances = ignore
-
 	local overlap = OverlapParams.new()
 	overlap.FilterType = Enum.RaycastFilterType.Exclude
 	overlap.FilterDescendantsInstances = ignore
-
 	local camPos = camera.CFrame.Position
-	for _ = 1, 24 do
-		local ang = (math.random() * 2 - 1) * math.rad(25)
-		local dir = CFrame.Angles(0, ang, 0):VectorToWorldSpace(flat)
-		local d = distance * (0.85 + math.random() * 0.3)
+
+	local function tryPoint(dir, d, needSight)
 		local p0 = tgt.hrp.Position + dir * d
 		local hit = workspace:Raycast(Vector3.new(p0.X, tgt.hrp.Position.Y + 6, p0.Z), Vector3.new(0, -80, 0), rayParams)
-		if hit and hit.Normal.Y > 0.85 and hit.Instance.CanCollide and hit.Material ~= Enum.Material.Water then
+		if hit and hit.Normal.Y > 0.75 and hit.Material ~= Enum.Material.Water then
 			local pos = hit.Position
-			if #workspace:GetPartBoundsInRadius(pos + Vector3.new(0, 4, 0), 3, overlap) == 0 then
+			if #workspace:GetPartBoundsInRadius(pos + Vector3.new(0, 4, 0), 2.5, overlap) == 0 then
+				if not needSight then return pos end
 				local eye = pos + Vector3.new(0, 3, 0)
-				-- the player must be able to see the spot
-				if workspace:Raycast(camPos, eye - camPos, rayParams) == nil then
-					return pos
-				end
+				if workspace:Raycast(camPos, eye - camPos, rayParams) == nil then return pos end
 			end
 		end
+		return nil
 	end
-	return nil
+
+	-- 1) in front of you, in view, with a clear line of sight
+	for _ = 1, 30 do
+		local ang = (math.random() * 2 - 1) * math.rad(35)
+		local dir = CFrame.Angles(0, ang, 0):VectorToWorldSpace(flat)
+		local p = tryPoint(dir, distance * (0.55 + math.random() * 0.7), true)
+		if p then return p end
+	end
+	-- 2) somewhere in front, even if the view is partly blocked
+	for _ = 1, 20 do
+		local ang = (math.random() * 2 - 1) * math.rad(60)
+		local dir = CFrame.Angles(0, ang, 0):VectorToWorldSpace(flat)
+		local p = tryPoint(dir, distance * (0.45 + math.random() * 0.8), false)
+		if p then return p end
+	end
+	-- 3) any free ground around you
+	return randomMapPoint(25, 60, tgt.hrp.Position)
 end
 
--- a plain blocky "player" with a fake name tag
+-- a classic yellow noob with orange "bacon" hair and a fake name tag
 local function buildDecoy()
-	local skins = {Color3.fromRGB(245, 205, 48), Color3.fromRGB(234, 184, 146), Color3.fromRGB(204, 142, 105)}
-	local shirts = {Color3.fromRGB(13, 105, 172), Color3.fromRGB(196, 40, 28), Color3.fromRGB(75, 151, 75), Color3.fromRGB(245, 205, 48)}
-	local pantsList = {Color3.fromRGB(40, 127, 71), Color3.fromRGB(16, 42, 220), Color3.fromRGB(80, 80, 80)}
-	local skin = skins[math.random(1, #skins)]
-	local shirt = shirts[math.random(1, #shirts)]
-	local pants = pantsList[math.random(1, #pantsList)]
+	local skin = Color3.fromRGB(245, 205, 48)
+	local shirt = Color3.fromRGB(13, 105, 172)
+	local pants = Color3.fromRGB(40, 127, 71)
+	local hairLight = Color3.fromRGB(214, 140, 60)
+	local hairDark = Color3.fromRGB(150, 75, 30)
 
 	local model = Instance.new("Model")
 	model.Name = "HorrorDecoy"
@@ -2890,6 +3100,23 @@ local function buildDecoy()
 	local mouth = dpart("Mouth", Vector3.new(0.55, 0.1, 0.1), Color3.new(0, 0, 0))
 	djoint(head, mouth, CFrame.new(0, -0.25, -0.62))
 
+	-- bacon hair: an orange cap with darker "bacon stripes", side and back locks and a wavy fringe
+	local function hairPart(size, off, color)
+		local hp = dpart("Hair", size, color)
+		djoint(head, hp, off)
+		return hp
+	end
+	hairPart(Vector3.new(1.4, 0.45, 1.4), CFrame.new(0, 0.68, 0.02), hairLight)
+	for i = 0, 3 do
+		hairPart(Vector3.new(1.42, 0.07, 0.2), CFrame.new(0, 0.92, -0.5 + i * 0.35), hairDark)
+	end
+	hairPart(Vector3.new(1.4, 0.9, 0.35), CFrame.new(0, 0.2, 0.62), hairLight)
+	hairPart(Vector3.new(0.3, 0.75, 1.2), CFrame.new(-0.67, 0.25, 0.05), hairLight)
+	hairPart(Vector3.new(0.3, 0.75, 1.2), CFrame.new(0.67, 0.25, 0.05), hairLight)
+	for i = -2, 2 do
+		hairPart(Vector3.new(0.28, 0.3 + (i % 2) * 0.12, 0.2), CFrame.new(i * 0.27, 0.52, -0.62), (i % 2 == 0) and hairLight or hairDark)
+	end
+
 	local arms, legs = {}, {}
 	for _, side in ipairs({-1, 1}) do
 		local arm = dpart(side < 0 and "Left Arm" or "Right Arm", Vector3.new(1, 2, 1), skin)
@@ -2909,34 +3136,41 @@ local function buildDecoy()
 	humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
 	humanoid.Parent = model
 
-	-- fake name tag so it looks like another player
-	local tag = new("BillboardGui", {
-		Size = UDim2.fromOffset(140, 24),
-		StudsOffset = Vector3.new(0, 1.9, 0),
-		AlwaysOnTop = false,
-		MaxDistance = 120,
-	}, head)
-	new("TextLabel", {
-		Size = UDim2.fromScale(1, 1),
-		BackgroundTransparency = 1,
-		Text = DECOY_NAMES[math.random(1, #DECOY_NAMES)],
-		Font = Enum.Font.SourceSansBold,
-		TextSize = 18,
-		TextColor3 = Color3.new(1, 1, 1),
-		TextStrokeTransparency = 0.4,
-	}, tag)
+	-- fake name tag (a failure here must never stop the mimic from spawning)
+	local name = randomName()
+	pcall(function()
+		local tag = new("BillboardGui", {
+			Size = UDim2.fromOffset(150, 24),
+			StudsOffset = Vector3.new(0, 2.2, 0),
+			AlwaysOnTop = false,
+			MaxDistance = 140,
+		}, head)
+		new("TextLabel", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			Text = name,
+			Font = Enum.Font.SourceSansBold,
+			TextSize = 18,
+			TextColor3 = Color3.new(1, 1, 1),
+			TextStrokeTransparency = 0.4,
+		}, tag)
+	end)
 
 	model.PrimaryPart = root
-	return {model = model, root = root, humanoid = humanoid, head = jHead, headPos = headPos, arms = arms, legs = legs}
+	return {
+		model = model, root = root, torso = torso, humanoid = humanoid, head = jHead, headPos = headPos,
+		arms = arms, legs = legs, name = name, skin = skin,
+	}
 end
 
--- returns {pos, lookAt} if the player got close (the monster emerges there), or nil
+-- returns {pos, lookAt, torsoPos} if the player came close (the monster crawls out there), or nil
 local function runDecoy(pos)
 	local d = buildDecoy()
 	local tgt0 = getTarget()
 	local faceAt = tgt0 and Vector3.new(tgt0.hrp.Position.X, pos.Y + 3.2, tgt0.hrp.Position.Z) or (pos + Vector3.new(0, 3.2, -10))
 	d.model.Parent = workspace
 	d.model:PivotTo(CFrame.lookAt(pos + Vector3.new(0, 3.2, 0), faceAt))
+	if CONFIG.DebugKeys then print("[HorrorMode] The mimic appeared: " .. d.name) end
 
 	local mode = math.random() < 0.5 and "jump" or "spin"
 	local startT = os.clock()
@@ -2944,7 +3178,7 @@ local function runDecoy(pos)
 	local jumpCount = 0
 	local armsAngle = 0.05
 
-	local conn = C(RunService.Heartbeat, function(dt)
+	local conn = RunService.Heartbeat:Connect(function(dt)
 		if not d.root.Parent then return end
 		local airborne = d.humanoid.FloorMaterial == Enum.Material.Air
 		local armTarget, legTarget = 0.05, 0
@@ -2960,6 +3194,7 @@ local function runDecoy(pos)
 			d.legs[side].joint.C0 = d.legs[side].pos * CFrame.Angles(0, 0, side * legTarget)
 		end
 	end)
+	table.insert(conns, conn)
 
 	local result = nil
 	while d.model.Parent and alive do
@@ -2985,14 +3220,14 @@ local function runDecoy(pos)
 		task.wait(0.05)
 	end
 
-	conn:Disconnect()
+	pcall(function() conn:Disconnect() end)
 
 	if not result then
 		d.model:Destroy()
 		return nil
 	end
 
-	-- reveal: the "player" convulses and its head twists around backwards
+	-- reveal: the noob convulses and its head twists around backwards
 	FX.spotted()
 	local rootCF = d.root.CFrame
 	local t0 = os.clock()
@@ -3008,23 +3243,68 @@ local function runDecoy(pos)
 		FX.shake(0.4)
 	end
 
-	-- the shell bursts open: every part flies apart
+	-- the skin tears: the torso splits in two, every part breaks off and flies apart
 	FX.sound("hit")
+	local torsoCF = d.torso.CFrame
+	result.torsoPos = torsoCF.Position
+
 	for _, obj in ipairs(d.model:GetDescendants()) do
 		if obj:IsA("Motor6D") then obj:Destroy() end
 	end
 	d.humanoid:Destroy()
 	d.root:Destroy()
+
+	-- the torso becomes two halves
+	local halfA = d.torso
+	halfA.Size = Vector3.new(1, 2, 1)
+	halfA.CFrame = torsoCF * CFrame.new(-0.5, 0, 0)
+	local halfB = halfA:Clone()
+	halfB.CFrame = torsoCF * CFrame.new(0.5, 0, 0)
+	halfB.Parent = d.model
+
+	-- shreds of torn yellow skin
+	for _ = 1, 9 do
+		local shred = Instance.new("Part")
+		shred.Name = "Skin"
+		shred.Size = Vector3.new(0.1, 0.5 + math.random() * 0.7, 0.4 + math.random() * 0.5)
+		shred.Color = d.skin
+		shred.Material = Enum.Material.SmoothPlastic
+		shred.CFrame = torsoCF * CFrame.new((math.random() - 0.5) * 1.6, (math.random() - 0.5) * 1.6, (math.random() - 0.5) * 0.6)
+			* CFrame.Angles(math.random() * 6, math.random() * 6, math.random() * 6)
+		shred.Parent = d.model
+	end
+
 	for _, obj in ipairs(d.model:GetChildren()) do
 		if obj:IsA("BasePart") then
 			obj.CanCollide = true
 			obj.Massless = false
-			obj.AssemblyLinearVelocity = Vector3.new(math.random(-18, 18), math.random(18, 34), math.random(-18, 18))
-			obj.AssemblyAngularVelocity = Vector3.new(math.random(-10, 10), math.random(-10, 10), math.random(-10, 10))
+			obj.AssemblyLinearVelocity = Vector3.new(math.random(-18, 18), math.random(14, 30), math.random(-18, 18))
+			obj.AssemblyAngularVelocity = Vector3.new(math.random(-12, 12), math.random(-12, 12), math.random(-12, 12))
 		end
 	end
+	halfA.AssemblyLinearVelocity = Vector3.new(-16, 22, math.random(-6, 6))
+	halfB.AssemblyLinearVelocity = Vector3.new(16, 22, math.random(-6, 6))
+
+	-- a burst of dark goo from the chest
+	pcall(function()
+		local gooPart = new("Part", {
+			Anchored = true, CanCollide = false, CanQuery = false, CanTouch = false, Transparency = 1,
+			Size = Vector3.new(1, 1, 1), CFrame = CFrame.new(result.torsoPos),
+		}, fxFolder)
+		local goo = new("ParticleEmitter", {
+			Texture = "rbxasset://textures/particles/smoke_main.dds",
+			Rate = 0, Lifetime = NumberRange.new(0.5, 1.2), Speed = NumberRange.new(10, 22),
+			SpreadAngle = Vector2.new(180, 180), Size = NumberSequence.new(0.6, 1.8),
+			Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(1, 1)}),
+			Color = ColorSequence.new(Color3.fromRGB(25, 3, 3), Color3.fromRGB(110, 10, 10)),
+			LightInfluence = 1, Drag = 3,
+		}, gooPart)
+		goo:Emit(70)
+		Debris:AddItem(gooPart, 3)
+	end)
+
 	local model = d.model
-	task.delay(5, function()
+	task.delay(6, function()
 		if model.Parent then model:Destroy() end
 	end)
 
@@ -3063,6 +3343,7 @@ local function runMonster(opts)
 	local chaseTime = 0          -- seconds spent running after the player (the decoy trigger)
 	local nextDecoyAt = os.clock() + math.random(CONFIG.DecoyMinInterval, CONFIG.DecoyMaxInterval)
 	local adaptive = 1
+	local forcedSpeed = nil      -- animation speed used while the monster is anchored (crawling out of the noob)
 
 	-- speed: base value * difficulty (* adaptive boost while chasing)
 	local function spdOf(base, chasing)
@@ -3125,6 +3406,7 @@ local function runMonster(opts)
 		local now = os.clock()
 		local v = root.AssemblyLinearVelocity
 		local speed = Vector3.new(v.X, 0, v.Z).Magnitude
+		if forcedSpeed then speed = forcedSpeed end
 		local scanning = now < scanUntil
 		local facing = (state == "stalk" or state == "strike") and not killing
 		humanoid.AutoRotate = not scanning and not killing and not facing
@@ -3291,16 +3573,18 @@ local function runMonster(opts)
 		end)
 	end
 
-	-- EMERGE: the monster climbs out of the burst "player" body and starts chasing
+	-- EMERGE: the monster crawls out of the torn skin of the noob and starts chasing you
 	local function emergeSequence()
-		state = "emerge"
+		state = "chase" -- crawl pose
+		forcedSpeed = 9
 		local S = CONFIG.MonsterScale
 		local gy = emerge.pos.Y
-		local crouchY = gy + 6.2 * S    -- root height while crouched ((5.2 + 1) * S)
-		local standY = gy + 10.1 * S    -- root height while standing ((9.1 + 1) * S)
-		local hideY = crouchY - 14 * S  -- whole body hidden under the floor
-		local px, pz = emerge.pos.X, emerge.pos.Z
-		local total = 3.0
+		local crawlY = gy + 5.9 * S      -- root height while crawling ((4.9 + 1) * S)
+		local hideY = crawlY - 12 * S    -- the whole body starts hidden under the noob
+		local from = Vector3.new(emerge.pos.X, 0, emerge.pos.Z)
+		local toward = Vector3.new(emerge.lookAt.X - emerge.pos.X, 0, emerge.lookAt.Z - emerge.pos.Z)
+		toward = toward.Magnitude > 0.1 and toward.Unit or Vector3.new(0, 0, -1)
+		local total = 3.4
 		local t0 = os.clock()
 		if m.roar then
 			m.roar.PlaybackSpeed = 0.28
@@ -3310,22 +3594,23 @@ local function runMonster(opts)
 			RunService.Heartbeat:Wait()
 			local t = os.clock() - t0
 			if t >= total then break end
-			local y
-			if t < 2.0 then
-				local a = t / 2.0
+			local y, crawled
+			if t < 1.4 then
+				local a = t / 1.4
 				a = a * a * (3 - 2 * a)
-				y = hideY + (crouchY - hideY) * a
+				y = hideY + (crawlY - hideY) * a
+				crawled = 0
 			else
-				state = "chase" -- stands up while the chase pose takes over
-				local a = (t - 2.0) / (total - 2.0)
-				a = a * a * (3 - 2 * a)
-				y = crouchY + (standY - crouchY) * a
+				y = crawlY
+				crawled = math.min((t - 1.4) * 4.5, 9) -- crawls a few studs toward you
 			end
-			root.CFrame = CFrame.lookAt(Vector3.new(px, y, pz), Vector3.new(emerge.lookAt.X, y, emerge.lookAt.Z))
+			local p = from + toward * crawled
+			root.CFrame = CFrame.lookAt(Vector3.new(p.X, y, p.Z), Vector3.new(p.X + toward.X, y, p.Z + toward.Z))
 			FX.static(0.5)
 			FX.shake(0.25)
 		end
 		root.Anchored = false
+		forcedSpeed = nil
 		state = "chase"
 		lastSeenT = os.clock()
 		local tgt = getTarget()
@@ -3386,6 +3671,14 @@ local function runMonster(opts)
 		lastTick = now
 		me.state = state
 
+		-- debug key [M]: summon the mimic right now
+		local forced = false
+		if debugForceDecoy then
+			debugForceDecoy = false
+			decoyAt, decoyTries = now, 0
+			forced = true
+		end
+
 		-- player respawned -> the monster moves to a new place
 		if monsterNeedsReset then
 			monsterNeedsReset = false
@@ -3439,7 +3732,7 @@ local function runMonster(opts)
 			lastSeenPos = target.hrp.Position
 			lastSeenT = now
 		end
-		if state == "chase" then chaseTime += tickDt end
+		if state == "chase" or state == "stalk" or state == "strike" then chaseTime += tickDt end
 
 		-- adaptive speed: faster when you are far ahead, a little slower when it is right on top of you
 		adaptive = 1
@@ -3485,20 +3778,21 @@ local function runMonster(opts)
 			end
 		end
 
-		-- decoy: queued after a long chase was lost (or, optionally, at random times)
+		-- mimic: queued after a long chase was lost, at random times, or with the debug key
 		local decoyReady = FEAT.Decoy and ((decoyAt ~= nil and now >= decoyAt) or (CONFIG.DecoyRandom and now >= nextDecoyAt))
-		if decoyReady and (state == "patrol" or state == "search") and target and fdist > 40 then
+		if decoyReady and target and fdist > 12 and (state == "patrol" or state == "search" or forced) then
 			local dp = getPointInFront(CONFIG.DecoyDistance)
 			if dp then
+				if CONFIG.DebugKeys then print("[HorrorMode] The mimic is spawning") end
 				pendingDecoyPoint = dp
 				wantDecoy = true
 				break
 			end
 			decoyTries += 1
 			if decoyAt then
-				decoyAt = (decoyTries > 5) and nil or (now + 2)
+				decoyAt = (decoyTries > 12) and nil or (now + 1)
 			end
-			nextDecoyAt = now + 10
+			nextDecoyAt = now + 5
 		end
 
 		-- state transitions
@@ -3662,8 +3956,7 @@ local function applyQuality()
 	for i, dot in ipairs(dots) do
 		dot.Visible = i <= Q.Dots
 	end
-	spot.Shadows = Q.Shadows
-	core.Shadows = Q.Shadows
+	Torch.setQuality(Q, FEAT.FlashlightFX)
 	if typeof(bloom) == "Instance" then bloom.Enabled = Q.Bloom end
 end
 
@@ -3678,6 +3971,8 @@ local function lowerQuality()
 	applyQuality()
 	print("[HorrorMode] Low frame rate - quality lowered to " .. qualityName)
 end
+
+Torch.setQuality(Q, FEAT.FlashlightFX)
 
 -- features that need the old-camera layer are hidden when it is switched off
 if not FEAT.VHSOverlay then
@@ -3700,6 +3995,8 @@ C(RunService.RenderStepped, function(dt)
 	if not alive then return end
 	local now = os.clock()
 	camera = workspace.CurrentCamera
+	if not FEAT.PlayerCrawl then playerCrawl = false end
+	pCrawlK += ((playerCrawl and 1 or 0) - pCrawlK) * math.min(dt * 7, 1)
 
 	-- monster proximity
 	local target = 0
@@ -3730,9 +4027,10 @@ C(RunService.RenderStepped, function(dt)
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	if humanoid and not saved.walkSpeed then saved.walkSpeed = humanoid.WalkSpeed end
 	local sprinting = false
+	local moveSpeed = 0
 	if humanoid and humanoid.Health > 0 and not killing then
 		local moving = humanoid.MoveDirection.Magnitude > 0.1
-		sprinting = FEAT.Sprint and sprintHeld and moving and not exhausted and stamina > 0
+		sprinting = FEAT.Sprint and sprintHeld and moving and not exhausted and stamina > 0 and not playerCrawl
 
 		if sprinting then
 			stamina -= dt / CONFIG.StaminaSeconds
@@ -3741,13 +4039,15 @@ C(RunService.RenderStepped, function(dt)
 				exhausted = true
 			end
 		else
-			stamina = math.min(1, stamina + dt / CONFIG.StaminaRegenSeconds)
+			stamina = math.min(1, stamina + dt / CONFIG.StaminaRegenSeconds * (playerCrawl and 1.6 or 1))
 			if exhausted and stamina >= 0.3 then
 				exhausted = false
 			end
 		end
 
-		if sprinting then
+		if playerCrawl then
+			humanoid.WalkSpeed = CONFIG.PlayerCrawlSpeed
+		elseif sprinting then
 			humanoid.WalkSpeed = CONFIG.PlayerSprintSpeed
 		elseif exhausted then
 			humanoid.WalkSpeed = CONFIG.PlayerWalkSpeed * 0.8
@@ -3761,20 +4061,22 @@ C(RunService.RenderStepped, function(dt)
 			local v = rootPart.AssemblyLinearVelocity
 			speed = Vector3.new(v.X, 0, v.Z).Magnitude
 		end
+		moveSpeed = speed
 		bobT += dt * speed * 0.9
 		local amp = math.clamp(speed / 16, 0, 1.2) * 0.12
 		local shakeScale = FEAT.CameraShake and CONFIG.Shake.Intensity or 0
 		local sh = (shake + eff * 0.15) * 0.25 * shakeScale
 		humanoid.CameraOffset = Vector3.new(
 			math.sin(bobT * 0.5) * amp * 0.6 + (math.random() - 0.5) * sh,
-			math.abs(math.sin(bobT * 0.5)) * amp + (math.random() - 0.5) * sh,
+			math.abs(math.sin(bobT * 0.5)) * amp + (math.random() - 0.5) * sh - CONFIG.CrawlCameraDrop * pCrawlK,
 			0
 		)
 	else
 		stamina, exhausted = 1, false
+		playerCrawl = false
 	end
 
-	fov += ((sprinting and 84 or 75) - fov) * math.min(dt * 6, 1)
+	fov += ((sprinting and 84 or 75) - 6 * pCrawlK - fov) * math.min(dt * 6, 1)
 	if not killing then camera.FieldOfView = fov end
 
 	-- player footsteps (default ones disabled; custom ones depend on surface and sprinting)
@@ -3806,6 +4108,7 @@ C(RunService.RenderStepped, function(dt)
 					vol *= 1.5
 					pitch *= 1.25
 				end
+				vol *= (1 - 0.7 * pCrawlK) -- crawling is quiet
 				stepSnd.Volume = vol
 				stepSnd.PlaybackSpeed = (0.55 + spd / 40) * pitch
 			end
@@ -3834,17 +4137,8 @@ C(RunService.RenderStepped, function(dt)
 			end
 		end
 	end
-	spot.Enabled = flashOn and now >= flickerUntil and not FX.flickerOff()
-	core.Enabled = spot.Enabled
-	local dim = FX.flickerDim()
-	if math.abs(dim - lastDim) > 0.01 then
-		lastDim = dim
-		spot.Brightness = CONFIG.FlashlightBrightness * dim
-		core.Brightness = CONFIG.FlashlightCoreBrightness * dim
-	end
-	if lightPart.Parent ~= camera then lightPart.Parent = camera end
-	flashCF = flashCF:Lerp(camera.CFrame, math.clamp(dt * 40, 0, 1))
-	lightPart.CFrame = flashCF
+	local torchOn = flashOn and now >= flickerUntil and not FX.flickerOff()
+	Torch.update(dt, now, torchOn, FX.flickerDim(), moveSpeed, pCrawlK, currentMonster and currentMonster.model)
 
 	-- post effects
 	if FEAT.VHSOverlay then
@@ -3993,7 +4287,7 @@ stopGame = function()
 		end
 	end
 	pcall(function() gui:Destroy() end)
-	pcall(function() lightPart:Destroy() end)
+	for _, p in ipairs(Torch.attached) do pcall(function() p:Destroy() end) end
 	for _, c in ipairs(Lighting:GetChildren()) do
 		if c:GetAttribute("HorrorKeep") then pcall(function() c:Destroy() end) end
 	end
