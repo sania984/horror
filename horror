@@ -1,10 +1,23 @@
---// HORROR MODE V8 — CLIENT: monster + items on your map, Flare Gun, inventory, decoy, teleport (single LocalScript, no server needed)
---// No teleporting you around and no generated map: the monster and items appear right on the place's map.
+--// HORROR MODE V9 - single LocalScript (client-side) with a lobby hub
+--//
 --// Where to put it: StarterPlayer -> StarterPlayerScripts -> LocalScript
---// (or just run it with an executor - the script does not use anything from Explorer).
---// Everything is created only on your client: darkness, fog, flashlight (key F),
---// first person, sprint (Shift), old-camera effects, sounds and the monster.
---// Only you can see and hear the monster.
+--// (or run it with an executor - the script does not use anything from Explorer).
+--//
+--// Flow:    LOBBY (monster in the center, forest behind it)  ->  PLAY  ->  game
+--//          STOP in the lobby stops the script, restores everything and deletes it.
+--//          In game: [I] inventory has "QUIT TO LOBBY", or press [End].
+--//
+--// Architecture (everything is in this one file, but in separate layers):
+--//   CORE  = gameplay mechanics: monster AI, stalking, damage, kills, items, difficulty.
+--//           The core never touches sounds or UI directly - it only calls the FX API.
+--//   FX    = client-side visuals and audio only: flashlight flicker, ambient sounds,
+--//           hallucinations, fake footsteps, screen glitches, camera shake, jumpscares.
+--//           FX never changes gameplay state, so you can switch any of it off in CONFIG.Features.
+--//   NOTE: this is a client script, so nothing here is server-authoritative. For a real
+--//           multiplayer game the CORE layer is the part you would move to a server Script.
+--//
+--// Every feature has a switch in CONFIG.Features and its own settings table.
+--// Features the current game cannot support are disabled automatically (see "SUPPORT").
 
 local Players = game:GetService("Players")
 local Lighting = game:GetService("Lighting")
@@ -13,15 +26,94 @@ local SoundService = game:GetService("SoundService")
 local PathfindingService = game:GetService("PathfindingService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local Debris = game:GetService("Debris")
 
 local player = Players.LocalPlayer
-local camera = workspace.CurrentCamera
+if not player then return end
 local playerGui = player:WaitForChild("PlayerGui")
 
-------------------------------------------------------------
--- SETTINGS
-------------------------------------------------------------
 local CONFIG = {
+	Version = "9.0",
+
+	-- ======================= MASTER SWITCHES (false = the feature is fully off) =======================
+	Features = {
+		VHSOverlay = true,       -- old-camera look: scanlines, grain, vignette, tracking bar, color grading
+		Flicker = true,          -- random flashlight flickering
+		AmbientSounds = true,    -- creepy one-shot sounds around you
+		Hallucinations = true,   -- shadow figures, eyes in the dark, flashed whispers
+		FakeFootsteps = true,    -- footsteps that creep up behind you with nothing there
+		ScreenGlitches = true,   -- random screen glitch bursts
+		CameraShake = true,
+		Jumpscares = true,       -- non-lethal scares (a face in your face, a shape behind you, a flash)
+		KillAnimations = true,   -- three kill cutscenes (off = plain death)
+		AdaptiveSpeed = true,    -- the monster adapts its speed to the distance to you
+		Difficulty = true,       -- everything gets harder over time
+		Stalking = true,         -- crouches and creeps behind you
+		SilentBehind = true,     -- the monster makes no sound while it is behind you
+		CrawlAnimation = true,   -- crawls on legs and arms when chasing
+		Decoy = true,            -- fake player after you escape a long chase
+		Teleport = true,         -- catches up by teleporting if you get too far away
+		Items = true,
+		FlareGun = true,
+		Inventory = true,
+		PlayerFootsteps = true,
+		Heartbeat = true,
+		Sprint = true,
+	},
+
+	-- ======================= PERFORMANCE =======================
+	Quality = "Medium",          -- "High", "Medium" or "Low"
+	AutoQuality = true,          -- lower the quality automatically if the frame rate drops
+	AutoQualityFps = 28,
+	QualityPresets = {
+		High   = {Scanlines = 6, Dots = 70, Shadows = true,  Bloom = true,  NoiseRate = 0.05}, -- Scanlines = line spacing in pixels (0 = off)
+		Medium = {Scanlines = 9, Dots = 40, Shadows = true,  Bloom = true,  NoiseRate = 0.08},
+		Low    = {Scanlines = 0, Dots = 15, Shadows = false, Bloom = false, NoiseRate = 0.15},
+	},
+
+	FirstPerson = true,
+	StopKey = Enum.KeyCode.End,  -- quit to the lobby
+
+	Lobby = {Origin = Vector3.new(0, 5000, 0), Trees = 90},
+
+	-- ======================= DIFFICULTY (value at start -> value after RampSeconds) =======================
+	Difficulty = {
+		RampSeconds = 900,
+		Speed = {1.0, 1.35},     -- monster speed multiplier
+		Sight = {1.0, 1.3},      -- monster sight range multiplier
+		Windup = {1.0, 0.6},     -- time you get before the lethal lunge (lower = less time)
+		Scares = {1.0, 2.5},     -- how often flickers, sounds, hallucinations, glitches and jumpscares happen
+		ShowLabel = true,        -- show the THREAT label
+	},
+	Adaptive = {MaxBoost = 1.35, StartDistance = 25, FullDistance = 90, MercyDistance = 10, MercyMultiplier = 0.92},
+
+	-- ======================= FX SETTINGS =======================
+	Flicker = {MinInterval = 7, MaxInterval = 22, NearMonsterChance = 0.35, DimAmount = 0.35},
+	Ambient = {MinInterval = 12, MaxInterval = 35, Volume = 0.9, Radius = {25, 70}},
+	AmbientEvents = {  -- built-in Roblox sounds, slowed down and processed; add your own rbxassetid:// entries
+		{id = "rbxasset://sounds/bass.wav",          speed = 0.18, volume = 1.6},                    -- low rumble
+		{id = "rbxasset://sounds/glassbreak.wav",    speed = 0.6,  volume = 0.8, distortion = 0.2},  -- distant glass
+		{id = "rbxasset://sounds/snap.mp3",          speed = 0.7,  volume = 1.2},                    -- a twig snapping
+		{id = "rbxasset://sounds/uuhhh.mp3",         speed = 0.22, volume = 1.0, distortion = 0.4},  -- distant moan
+		{id = "rbxasset://sounds/impact_water.mp3",  speed = 0.6,  volume = 0.9},                    -- something in the water
+		{id = "rbxasset://sounds/switch.wav",        speed = 0.5,  volume = 1.0},                    -- a far click
+	},
+	FakeFootsteps = {MinInterval = 30, MaxInterval = 80, Duration = 5, Volume = 1.2},
+	Hallucination = {
+		MinInterval = 35, MaxInterval = 90, Lifetime = 6,
+		Types = {"figure", "eyes", "text"},
+		Texts = {"BEHIND YOU", "IT SEES YOU", "DON'T LOOK", "RUN", "TURN AROUND", "NOT ALONE"},
+	},
+	Glitch = {MinInterval = 9, MaxInterval = 28},
+	Shake = {Intensity = 1.0},
+	Jumpscare = {MinInterval = 60, MaxInterval = 150, Kinds = {"face", "flash", "behind"}},
+	KillVariants = {"lunge", "grab", "pounce"},   -- which kill cutscenes may play
+
+	-- the fake player appears in front of you when the monster loses you after running this long
+	DecoyAfterChaseSeconds = 10,
+	DecoyRandom = false,         -- also spawn decoys at random times (DecoyMinInterval..DecoyMaxInterval)
+
 	-- Atmosphere
 	FogEnd = 80,                 -- lower = thicker fog
 	DisableMapLights = true,     -- turn off the map's lamps (client-side only)
@@ -34,11 +126,11 @@ local CONFIG = {
 
 	-- Flashlight
 	FlashlightKey = Enum.KeyCode.F,
-	FlashlightRange = 70,
-	FlashlightBrightness = 3,        -- soft edge of the spot
-	FlashlightAngle = 20,            -- width of the whole spot (degrees)
-	FlashlightCoreBrightness = 6,    -- bright core in the middle of the spot
-	FlashlightCoreAngle = 8,         -- width of the core (degrees)
+	FlashlightRange = 95,
+	FlashlightBrightness = 5,        -- soft edge of the spot
+	FlashlightAngle = 22,            -- width of the whole spot (degrees)
+	FlashlightCoreBrightness = 10,   -- bright core in the middle of the spot
+	FlashlightCoreAngle = 9,         -- width of the core (degrees)
 	FlashlightSightMultiplier = 0.5, -- with the flashlight on, the monster's sight range is multiplied by this (below 1 = sees worse)
 
 	-- Monster
@@ -113,9 +205,13 @@ local CONFIG = {
 	},
 }
 
+
+
 ------------------------------------------------------------
--- HELPERS
+-- RUNTIME HELPERS
 ------------------------------------------------------------
+local Runtime = {sounds = setmetatable({}, {__mode = "v"}), soundCount = 0}
+
 local function new(class, props, parent, keep)
 	local o = Instance.new(class)
 	for k, v in pairs(props) do o[k] = v end
@@ -124,650 +220,147 @@ local function new(class, props, parent, keep)
 	return o
 end
 
-local function makeSound(parent, id, props)
-	if not id or id == "" then return nil end
-	local s = Instance.new("Sound")
-	s.SoundId = id
-	for k, v in pairs(props or {}) do s[k] = v end
-	s.Parent = parent
+-- like new(), but returns an inert table if the instance cannot be created (graceful fallback)
+local function safeNew(class, props, parent, keep)
+	local ok, o = pcall(new, class, props, parent, keep)
+	if ok then return o end
+	return {}
+end
+
+------------------------------------------------------------
+-- SUPPORT: probe what this game allows and disable what it does not
+------------------------------------------------------------
+local Support = {Sound = true, Raycast = true, PostEffects = true, Pathfinding = true, Prompts = true, Camera = true}
+do
+	local function probe(name, fn)
+		local ok, res = pcall(fn)
+		if not ok or res == false then Support[name] = false end
+	end
+	probe("Sound", function() Instance.new("Sound"):Destroy() return true end)
+	probe("PostEffects", function()
+		Instance.new("ColorCorrectionEffect"):Destroy()
+		Instance.new("BlurEffect"):Destroy()
+		return true
+	end)
+	probe("Raycast", function() return typeof(workspace.Raycast) == "function" end)
+	probe("Pathfinding", function() return PathfindingService:CreatePath({AgentRadius = 2.5}) ~= nil end)
+	probe("Prompts", function() return ProximityPromptService.Enabled end)
+	probe("Camera", function() return workspace.CurrentCamera ~= nil end)
+end
+
+if not Support.Camera then
+	warn("[HorrorMode] No camera available in this game - script stopped.")
+	return
+end
+
+-- FEAT = the switches from CONFIG.Features minus everything this game cannot support
+local FEAT = {}
+local FEAT_NA = {} -- feature -> reason it was turned off automatically
+for k, v in pairs(CONFIG.Features) do FEAT[k] = v end
+do
+	local function disable(keys, why)
+		for _, k in ipairs(keys) do
+			if FEAT[k] then
+				FEAT[k] = false
+				FEAT_NA[k] = why
+			end
+		end
+	end
+	if not Support.Sound then
+		disable({"AmbientSounds", "FakeFootsteps", "PlayerFootsteps", "Heartbeat"}, "no audio")
+	end
+	if not Support.Raycast then
+		disable({"Items", "Decoy", "Teleport", "Hallucinations", "Jumpscares"}, "no raycasting")
+	end
+end
+do
+	local off = {}
+	for k, why in pairs(FEAT_NA) do table.insert(off, k .. " (" .. why .. ")") end
+	if not Support.Pathfinding then table.insert(off, "Pathfinding (monster moves directly)") end
+	if not Support.Prompts then table.insert(off, "ProximityPrompts (pick up items with [E])") end
+	if not Support.PostEffects then table.insert(off, "PostEffects (no color grading/blur)") end
+	if #off > 0 then print("[HorrorMode] Unsupported here, using fallbacks: " .. table.concat(off, ", ")) end
+end
+
+function Runtime.makeSound(parent, id, props)
+	if not Support.Sound or not id or id == "" then return nil end
+	local ok, s = pcall(function()
+		local snd = Instance.new("Sound")
+		snd.SoundId = id
+		for k, v in pairs(props or {}) do snd[k] = v end
+		snd.Parent = parent
+		return snd
+	end)
+	if not ok then return nil end
+	Runtime.soundCount += 1
+	Runtime.sounds[Runtime.soundCount] = s
 	return s
 end
+local makeSound = Runtime.makeSound
 
 local function addReverb(sound, wet)
 	if not sound then return end
-	local r = Instance.new("ReverbSoundEffect")
-	r.DecayTime = 3
-	r.Density = 1
-	r.Diffusion = 1
-	r.DryLevel = -2
-	r.WetLevel = wet or -6
-	r.Parent = sound
+	pcall(function()
+		local r = Instance.new("ReverbSoundEffect")
+		r.DecayTime = 3
+		r.Density = 1
+		r.Diffusion = 1
+		r.DryLevel = -2
+		r.WetLevel = wet or -6
+		r.Parent = sound
+	end)
 end
 
 local function addDistortion(sound, level)
 	if not sound then return end
-	local d = Instance.new("DistortionSoundEffect")
-	d.Level = level
-	d.Parent = sound
+	pcall(function()
+		local d = Instance.new("DistortionSoundEffect")
+		d.Level = level
+		d.Parent = sound
+	end)
 end
 
 ------------------------------------------------------------
--- CLEANUP OF THE PREVIOUS RUN (if the script was started again)
+-- LIGHTING HELPERS (snapshot / restore, stash the game's own sky and effects)
 ------------------------------------------------------------
-do
-	local g = playerGui:FindFirstChild("OldCamera")
-	if g then g:Destroy() end
-	local m = workspace:FindFirstChild("HorrorMonster")
-	if m then m:Destroy() end
-	for _, n in ipairs({"HorrorForest", "HorrorItems"}) do
-		local o = workspace:FindFirstChild(n)
-		if o then o:Destroy() end
+local LIGHT_PROPS = {"ClockTime", "Brightness", "Ambient", "OutdoorAmbient", "ColorShift_Top", "ColorShift_Bottom",
+	"GlobalShadows", "EnvironmentDiffuseScale", "EnvironmentSpecularScale", "FogColor", "FogStart", "FogEnd"}
+
+local function snapshotLighting()
+	local t = {}
+	for _, k in ipairs(LIGHT_PROPS) do
+		pcall(function() t[k] = Lighting[k] end)
 	end
-	local f = camera:FindFirstChild("HorrorFlashlight")
-	if f then f:Destroy() end
+	return t
+end
+
+local function restoreLighting(t)
+	for k, v in pairs(t) do
+		pcall(function() Lighting[k] = v end)
+	end
+end
+
+-- the game's own Sky / Atmosphere / post effects are moved out of Lighting (not destroyed) and put back later
+local function stashLightingObjects()
+	local list = {}
 	for _, c in ipairs(Lighting:GetChildren()) do
-		if c:GetAttribute("HorrorKeep") then c:Destroy() end
-	end
-end
-
-pcall(function()
-	player.CameraMode = Enum.CameraMode.LockFirstPerson
-end)
-
-------------------------------------------------------------
--- 1. DARKNESS AND FOG (values are held even if the game tries to change them)
-------------------------------------------------------------
-local function applyLightingProps()
-	Lighting.ClockTime = 0
-	Lighting.Brightness = 0
-	Lighting.Ambient = Color3.new(0, 0, 0)
-	Lighting.OutdoorAmbient = Color3.new(0, 0, 0)
-	Lighting.ColorShift_Top = Color3.new(0, 0, 0)
-	Lighting.ColorShift_Bottom = Color3.new(0, 0, 0)
-	Lighting.GlobalShadows = true
-	Lighting.EnvironmentDiffuseScale = 0
-	Lighting.EnvironmentSpecularScale = 0
-	Lighting.FogColor = Color3.new(0, 0, 0)
-	Lighting.FogStart = 0
-	Lighting.FogEnd = CONFIG.FogEnd
-end
-
-local function purgeLighting(child)
-	if (child:IsA("Sky") or child:IsA("Atmosphere") or child:IsA("PostEffect"))
-		and not child:GetAttribute("HorrorKeep") then
-		child:Destroy()
-	end
-end
-
-for _, c in ipairs(Lighting:GetChildren()) do purgeLighting(c) end
-Lighting.ChildAdded:Connect(function(c)
-	task.defer(purgeLighting, c)
-end)
-
-new("Sky", {
-	SkyboxBk = "", SkyboxDn = "", SkyboxFt = "",
-	SkyboxLf = "", SkyboxRt = "", SkyboxUp = "",
-	StarCount = 0,
-	CelestialBodiesShown = false,
-}, Lighting, true)
-
-new("Atmosphere", {
-	Density = 0.55,
-	Offset = 0,
-	Color = Color3.new(0, 0, 0),
-	Decay = Color3.new(0, 0, 0),
-	Glare = 0,
-	Haze = 10,
-}, Lighting, true)
-
-applyLightingProps()
-task.spawn(function()
-	while true do
-		task.wait(0.5)
-		applyLightingProps()
-	end
-end)
-
-if CONFIG.DisableMapLights then
-	local function killLight(obj)
-		if (obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight"))
-			and not obj:GetAttribute("HorrorKeep") then
-			obj.Enabled = false
+		if (c:IsA("Sky") or c:IsA("Atmosphere") or c:IsA("PostEffect")) and not c:GetAttribute("HorrorKeep") then
+			table.insert(list, c)
+			c.Parent = nil
 		end
 	end
-	for _, o in ipairs(workspace:GetDescendants()) do killLight(o) end
-	workspace.DescendantAdded:Connect(killLight)
+	return list
 end
 
-------------------------------------------------------------
--- 2. SOUNDS (global)
-------------------------------------------------------------
-local ambient = makeSound(SoundService, CONFIG.Sounds.Ambient, {Looped = true, Volume = 0.35, PlaybackSpeed = 0.3})
-addReverb(ambient, -3)
-if ambient then ambient:Play() end
-
-local beat = makeSound(SoundService, CONFIG.Sounds.Heartbeat, {Volume = 0.5, PlaybackSpeed = 0.6})
-local clickSnd = makeSound(SoundService, CONFIG.Sounds.Click, {Volume = 0.8})
-local scareSnd = makeSound(SoundService, CONFIG.Sounds.Scare, {Volume = 0.6, PlaybackSpeed = 0.5})
-addDistortion(scareSnd, 0.5)
-local hitSnd = makeSound(SoundService, CONFIG.Sounds.Hit, {Volume = 1, PlaybackSpeed = 0.7})
-local shotSnd = makeSound(SoundService, CONFIG.Sounds.FlareShot, {Volume = 1})
-local pickSnd = makeSound(SoundService, CONFIG.Sounds.Pickup, {Volume = 0.9, PlaybackSpeed = 1.3})
-local invOpenSnd = makeSound(SoundService, CONFIG.Sounds.InvOpen, {Volume = 0.8, PlaybackSpeed = 0.7})
-local invCloseSnd = makeSound(SoundService, CONFIG.Sounds.InvClose, {Volume = 0.7, PlaybackSpeed = 1.3})
-local stepSnd = makeSound(SoundService, CONFIG.Sounds.Walk, {Looped = true, Volume = 0})
-
-------------------------------------------------------------
--- 3. OLD CAMERA EFFECTS
-------------------------------------------------------------
-local cc = new("ColorCorrectionEffect", {
-	Name = "OldCamCC",
-	Saturation = -0.35,
-	Contrast = 0.25,
-	Brightness = -0.02,
-	TintColor = Color3.fromRGB(225, 235, 215),
-}, Lighting, true)
-local blur = new("BlurEffect", {Name = "OldCamBlur", Size = 1.5}, Lighting, true)
-new("BloomEffect", {Name = "OldCamBloom", Intensity = 0.7, Size = 28, Threshold = 0.85}, Lighting, true)
-
-local gui = new("ScreenGui", {
-	Name = "OldCamera",
-	IgnoreGuiInset = true,
-	ResetOnSpawn = false,
-	DisplayOrder = 50,
-	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-}, playerGui)
-
--- vignette
-local vignette = {}
-local function vigEdge(pos, size, rot)
-	local f = new("Frame", {
-		Position = pos,
-		Size = size,
-		BackgroundColor3 = Color3.new(0, 0, 0),
-		BackgroundTransparency = 0.35,
-		BorderSizePixel = 0,
-	}, gui)
-	new("UIGradient", {
-		Rotation = rot,
-		Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0),
-			NumberSequenceKeypoint.new(1, 1),
-		}),
-	}, f)
-	table.insert(vignette, f)
-end
-vigEdge(UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0.3, 0), 90)
-vigEdge(UDim2.new(0, 0, 0.7, 0), UDim2.new(1, 0, 0.3, 0), 270)
-vigEdge(UDim2.new(0, 0, 0, 0), UDim2.new(0.25, 0, 1, 0), 0)
-vigEdge(UDim2.new(0.75, 0, 0, 0), UDim2.new(0.25, 0, 1, 0), 180)
-
--- scanlines
-local lines = new("Frame", {
-	Size = UDim2.fromScale(1, 1),
-	BackgroundTransparency = 1,
-}, gui)
-do
-	local vp = camera.ViewportSize
-	for y = -6, vp.Y, 6 do
-		new("Frame", {
-			Position = UDim2.new(0, 0, 0, y),
-			Size = UDim2.new(1, 0, 0, 2),
-			BackgroundColor3 = Color3.new(0, 0, 0),
-			BackgroundTransparency = 0.85,
-			BorderSizePixel = 0,
-		}, lines)
+local function unstashLightingObjects(list)
+	for _, c in ipairs(list) do
+		pcall(function() c.Parent = Lighting end)
 	end
 end
 
--- grain / static
-local dots = {}
-for i = 1, 70 do
-	dots[i] = new("Frame", {
-		Size = UDim2.fromOffset(2, 2),
-		BackgroundColor3 = Color3.new(1, 1, 1),
-		BackgroundTransparency = 0.85,
-		BorderSizePixel = 0,
-	}, gui)
-end
 
--- VHS tracking bar
-local bar = new("Frame", {
-	Size = UDim2.new(1, 0, 0, 10),
-	BackgroundColor3 = Color3.new(1, 1, 1),
-	BackgroundTransparency = 0.88,
-	BorderSizePixel = 0,
-	Visible = false,
-}, gui)
-
--- viewfinder frame
-local function bracket(ax, ay)
-	local x = ax == 0 and 24 or -24
-	local y = ay == 0 and 24 or -24
-	new("Frame", {
-		AnchorPoint = Vector2.new(ax, ay),
-		Position = UDim2.new(ax, x, ay, y),
-		Size = UDim2.fromOffset(34, 3),
-		BackgroundColor3 = Color3.new(1, 1, 1),
-		BackgroundTransparency = 0.3,
-		BorderSizePixel = 0,
-	}, gui)
-	new("Frame", {
-		AnchorPoint = Vector2.new(ax, ay),
-		Position = UDim2.new(ax, x, ay, y),
-		Size = UDim2.fromOffset(3, 34),
-		BackgroundColor3 = Color3.new(1, 1, 1),
-		BackgroundTransparency = 0.3,
-		BorderSizePixel = 0,
-	}, gui)
-end
-bracket(0, 0)
-bracket(1, 0)
-bracket(0, 1)
-bracket(1, 1)
-
-local function label(text, pos, anchor, alignX, size)
-	return new("TextLabel", {
-		BackgroundTransparency = 1,
-		Text = text,
-		Position = pos,
-		AnchorPoint = anchor,
-		Size = UDim2.fromOffset(260, 28),
-		Font = Enum.Font.Code,
-		TextSize = size or 22,
-		TextColor3 = Color3.new(1, 1, 1),
-		TextStrokeTransparency = 0.5,
-		TextXAlignment = alignX,
-	}, gui)
-end
-
-local recDot = new("Frame", {
-	Position = UDim2.new(0, 64, 0, 66),
-	Size = UDim2.fromOffset(16, 16),
-	BackgroundColor3 = Color3.fromRGB(230, 20, 20),
-	BorderSizePixel = 0,
-}, gui)
-new("UICorner", {CornerRadius = UDim.new(1, 0)}, recDot)
-label("REC", UDim2.new(0, 88, 0, 60), Vector2.new(0, 0), Enum.TextXAlignment.Left)
-local timeLabel = label("00:00:00", UDim2.new(0, 64, 0, 90), Vector2.new(0, 0), Enum.TextXAlignment.Left)
-label("CAM 01", UDim2.new(1, -64, 0, 60), Vector2.new(1, 0), Enum.TextXAlignment.Right)
-label(os.date("%d.%m.%Y"), UDim2.new(1, -64, 1, -90), Vector2.new(1, 1), Enum.TextXAlignment.Right, 20)
-label("BAT [|||  ]", UDim2.new(0, 64, 1, -90), Vector2.new(0, 1), Enum.TextXAlignment.Left, 20)
-
--- red flash on hit
-local flash = new("Frame", {
-	Size = UDim2.fromScale(1, 1),
-	BackgroundColor3 = Color3.fromRGB(170, 0, 0),
-	BackgroundTransparency = 1,
-	BorderSizePixel = 0,
-}, gui)
-
--- stamina bar
-local staminaBack = new("Frame", {
-	AnchorPoint = Vector2.new(0.5, 1),
-	Position = UDim2.new(0.5, 0, 1, -50),
-	Size = UDim2.fromOffset(220, 6),
-	BackgroundColor3 = Color3.new(0, 0, 0),
-	BackgroundTransparency = 0.5,
-	BorderSizePixel = 0,
-	Visible = false,
-}, gui)
-local staminaFill = new("Frame", {
-	Size = UDim2.fromScale(1, 1),
-	BackgroundColor3 = Color3.new(1, 1, 1),
-	BackgroundTransparency = 0.15,
-	BorderSizePixel = 0,
-}, staminaBack)
-
--- flare hint, notifications, fade-out on death
-local flareLabel = label("", UDim2.new(0.5, 0, 1, -110), Vector2.new(0.5, 1), Enum.TextXAlignment.Center, 20)
-flareLabel.Size = UDim2.fromOffset(460, 28)
-flareLabel.Visible = false
-
-local toast = label("", UDim2.new(0.5, 0, 0.78, 0), Vector2.new(0.5, 0.5), Enum.TextXAlignment.Center, 22)
-toast.Size = UDim2.fromOffset(560, 30)
-toast.TextTransparency = 1
-toast.TextStrokeTransparency = 1
-
-local killFade = new("Frame", {
-	Size = UDim2.fromScale(1, 1),
-	BackgroundColor3 = Color3.new(0, 0, 0),
-	BackgroundTransparency = 1,
-	BorderSizePixel = 0,
-	ZIndex = 20,
-}, gui)
-
-local toastToken = 0
-local function showToast(text)
-	toastToken += 1
-	local my = toastToken
-	toast.Text = text
-	toast.TextTransparency = 0
-	toast.TextStrokeTransparency = 0.5
-	task.delay(2.5, function()
-		if toastToken == my then
-			TweenService:Create(toast, TweenInfo.new(0.6), {TextTransparency = 1, TextStrokeTransparency = 1}):Play()
-		end
-	end)
-end
-
-------------------------------------------------------------
--- 4. STATE, FLASHLIGHT, INPUT
-------------------------------------------------------------
-local currentMonster = nil      -- {model, root}
-local stamina, exhausted, sprintHeld = 1, false, false
-local intensity, staticBurst, glitch, shake = 0, 0, 0, 0
-local eff = 0
-local bobT, fov = 0, 75
-local beatT = 1
-local noiseT, secT = 0, 0
-local startTime = os.time()
-local flashCF = camera.CFrame
-local flashOn = true
-local flickerUntil = 0
-local flickerCheck = 0
-local killing = false
-local hasFlareGun = false
-local flares = 0
-local fireFlare = function() end
-local refreshInventory = function() end
-
-local function updateFlareHud()
-	flareLabel.Visible = hasFlareGun or flares > 0
-	if hasFlareGun then
-		flareLabel.Text = string.format("FLARE GUN: %d   [G]", flares)
-	else
-		flareLabel.Text = string.format("FLARES: %d  (Flare Gun needed)", flares)
-	end
-	refreshInventory()
-end
-
-------------------------------------------------------------
--- INVENTORY (key I)
-------------------------------------------------------------
-local medkits, energies = 0, 0
-local invOpen = false
-
-local useMedkit, useEnergy
-
-local invPanel = new("Frame", {
-	AnchorPoint = Vector2.new(0.5, 0.5),
-	Position = UDim2.fromScale(0.5, 0.5),
-	Size = UDim2.fromOffset(640, 340),
-	BackgroundColor3 = Color3.fromRGB(8, 10, 8),
-	BackgroundTransparency = 0.12,
-	BorderSizePixel = 0,
-	Visible = false,
-	ZIndex = 5,
-}, gui)
-new("UIStroke", {Color = Color3.fromRGB(190, 200, 180), Thickness = 1.5, Transparency = 0.4}, invPanel)
-
--- an invisible "modal" button frees the mouse in first person while the inventory is open
-new("TextButton", {
-	Size = UDim2.fromScale(1, 1),
-	BackgroundTransparency = 1,
-	Text = "",
-	Modal = true,
-	ZIndex = 5,
-}, invPanel)
-
-local function invText(text, pos, size, textSize, color, parent, align)
-	return new("TextLabel", {
-		BackgroundTransparency = 1,
-		Text = text,
-		Position = pos,
-		Size = size,
-		Font = Enum.Font.Code,
-		TextSize = textSize,
-		TextColor3 = color or Color3.new(1, 1, 1),
-		TextXAlignment = align or Enum.TextXAlignment.Center,
-		TextWrapped = true,
-		ZIndex = 6,
-	}, parent)
-end
-
-invText("INVENTORY", UDim2.new(0, 0, 0, 12), UDim2.new(1, 0, 0, 30), 26, nil, invPanel)
-invText("[" .. CONFIG.InventoryKey.Name .. "] close", UDim2.new(0, 0, 0, 40), UDim2.new(1, 0, 0, 20), 16, Color3.fromRGB(170, 175, 165), invPanel)
-local invFooter = invText("", UDim2.new(0, 0, 1, -34), UDim2.new(1, 0, 0, 26), 18, Color3.fromRGB(200, 210, 190), invPanel)
-
-local function makeCard(index, title, iconText, iconColor, hint, useCallback)
-	local card = new("Frame", {
-		Position = UDim2.new(0, 20 + (index - 1) * 152, 0, 72),
-		Size = UDim2.fromOffset(140, 210),
-		BackgroundColor3 = Color3.fromRGB(26, 30, 26),
-		BackgroundTransparency = 0.1,
-		BorderSizePixel = 0,
-		ZIndex = 6,
-	}, invPanel)
-	new("UICorner", {CornerRadius = UDim.new(0, 6)}, card)
-
-	local icon = new("Frame", {
-		Position = UDim2.new(0.5, -40, 0, 10),
-		Size = UDim2.fromOffset(80, 56),
-		BackgroundColor3 = iconColor,
-		BorderSizePixel = 0,
-		ZIndex = 7,
-	}, card)
-	new("UICorner", {CornerRadius = UDim.new(0, 6)}, icon)
-	invText(iconText, UDim2.new(0, 0, 0, 0), UDim2.fromScale(1, 1), 24, Color3.new(0, 0, 0), icon).ZIndex = 8
-
-	invText(title, UDim2.new(0, 0, 0, 74), UDim2.new(1, 0, 0, 22), 17, nil, card)
-	local count = invText("", UDim2.new(0, 0, 0, 98), UDim2.new(1, 0, 0, 28), 22, Color3.fromRGB(255, 235, 170), card)
-	invText(hint, UDim2.new(0, 6, 0, 130), UDim2.new(1, -12, 0, 32), 14, Color3.fromRGB(160, 165, 155), card)
-
-	if useCallback then
-		local btn = new("TextButton", {
-			Position = UDim2.new(0, 10, 1, -40),
-			Size = UDim2.new(1, -20, 0, 30),
-			BackgroundColor3 = Color3.fromRGB(60, 90, 60),
-			BorderSizePixel = 0,
-			Text = "USE",
-			Font = Enum.Font.Code,
-			TextSize = 15,
-			TextColor3 = Color3.new(1, 1, 1),
-			ZIndex = 8,
-		}, card)
-		new("UICorner", {CornerRadius = UDim.new(0, 4)}, btn)
-		btn.Activated:Connect(useCallback)
-	end
-	return {card = card, count = count}
-end
-
-local cardGun = makeCard(1, "Flare Gun", "FG", Color3.fromRGB(230, 110, 40), "Fire: [" .. CONFIG.FlareKey.Name .. "]. Stuns the monster", nil)
-local cardFlares = makeCard(2, "Flares", "FL", Color3.fromRGB(220, 50, 40), "Ammo for the Flare Gun", nil)
-local cardMedkit = makeCard(3, "Medkit", "+", Color3.fromRGB(235, 235, 235), "Heals. Quick key: [" .. CONFIG.MedkitKey.Name .. "]", function() useMedkit() end)
-local cardEnergy = makeCard(4, "Energy Drink", "EN", Color3.fromRGB(60, 220, 190), "Restores sprint. Quick key: [" .. CONFIG.EnergyKey.Name .. "]", function() useEnergy() end)
-
-refreshInventory = function()
-	cardGun.count.Text = hasFlareGun and "Have" or "None"
-	cardFlares.count.Text = "x" .. flares
-	cardMedkit.count.Text = "x" .. medkits
-	cardEnergy.count.Text = "x" .. energies
-	cardGun.card.BackgroundTransparency = hasFlareGun and 0.1 or 0.55
-	cardFlares.card.BackgroundTransparency = flares > 0 and 0.1 or 0.55
-	cardMedkit.card.BackgroundTransparency = medkits > 0 and 0.1 or 0.55
-	cardEnergy.card.BackgroundTransparency = energies > 0 and 0.1 or 0.55
-end
-refreshInventory()
-
-local function setInventory(open)
-	if killing then open = false end
-	if open == invOpen then return end
-	invOpen = open
-	invPanel.Visible = open
-	refreshInventory()
-	if open then
-		if invOpenSnd then invOpenSnd:Play() end
-	else
-		if invCloseSnd then invCloseSnd:Play() end
-	end
-end
-
-useMedkit = function()
-	if killing then return end
-	if medkits <= 0 then
-		showToast("No medkits")
-		return
-	end
-	local ch = player.Character
-	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-	if not hum or hum.Health <= 0 then return end
-	if hum.Health >= hum.MaxHealth then
-		showToast("Health is already full")
-		return
-	end
-	medkits -= 1
-	hum.Health = math.min(hum.MaxHealth, hum.Health + CONFIG.MedkitHeal)
-	if pickSnd then pickSnd:Play() end
-	showToast("Medkit: +" .. CONFIG.MedkitHeal .. " HP")
-	refreshInventory()
-end
-
-useEnergy = function()
-	if killing then return end
-	if energies <= 0 then
-		showToast("No energy drinks")
-		return
-	end
-	energies -= 1
-	stamina = 1
-	exhausted = false
-	if pickSnd then pickSnd:Play() end
-	showToast("Energy drink: stamina restored")
-	refreshInventory()
-end
-
-local lightPart = new("Part", {
-	Name = "HorrorFlashlight",
-	Anchored = true,
-	CanCollide = false,
-	CanQuery = false,
-	CanTouch = false,
-	Transparency = 1,
-	Size = Vector3.new(0.2, 0.2, 0.2),
-}, nil, true)
-lightPart.Parent = camera
-
-local spot = new("SpotLight", {
-	Face = Enum.NormalId.Front,
-	Range = CONFIG.FlashlightRange,
-	Brightness = CONFIG.FlashlightBrightness,
-	Angle = CONFIG.FlashlightAngle,
-	Color = Color3.fromRGB(255, 244, 214),
-	Shadows = true,
-	Enabled = true,
-}, lightPart, true)
-
-local core = new("SpotLight", {
-	Face = Enum.NormalId.Front,
-	Range = CONFIG.FlashlightRange,
-	Brightness = CONFIG.FlashlightCoreBrightness,
-	Angle = CONFIG.FlashlightCoreAngle,
-	Color = Color3.fromRGB(255, 246, 225),
-	Shadows = true,
-	Enabled = true,
-}, lightPart, true)
-
-local function toggleFlashlight()
-	flashOn = not flashOn
-	if clickSnd then clickSnd:Play() end
-end
-
-UserInputService.InputBegan:Connect(function(input, gpe)
-	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
-		sprintHeld = true
-	end
-	if not gpe and input.KeyCode == CONFIG.FlashlightKey then
-		toggleFlashlight()
-	elseif not gpe and input.KeyCode == CONFIG.FlareKey then
-		fireFlare()
-	elseif not gpe and input.KeyCode == CONFIG.InventoryKey then
-		setInventory(not invOpen)
-	elseif not gpe and input.KeyCode == CONFIG.MedkitKey then
-		useMedkit()
-	elseif not gpe and input.KeyCode == CONFIG.EnergyKey then
-		useEnergy()
-	end
-end)
-UserInputService.InputEnded:Connect(function(input)
-	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
-		sprintHeld = false
-	end
-end)
-
-if UserInputService.TouchEnabled then
-	local function touchButton(text, yOffset)
-		local btn = new("TextButton", {
-			AnchorPoint = Vector2.new(1, 1),
-			Position = UDim2.new(1, -40, 1, yOffset),
-			Size = UDim2.fromOffset(90, 90),
-			BackgroundColor3 = Color3.new(0, 0, 0),
-			BackgroundTransparency = 0.4,
-			Text = text,
-			Font = Enum.Font.Code,
-			TextSize = 24,
-			TextColor3 = Color3.new(1, 1, 1),
-		}, gui)
-		new("UICorner", {CornerRadius = UDim.new(1, 0)}, btn)
-		return btn
-	end
-	local run = touchButton("RUN", -150)
-	run.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-			sprintHeld = true
-		end
-	end)
-	run.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-			sprintHeld = false
-		end
-	end)
-	local light = touchButton("LIGHT", -250)
-	light.Activated:Connect(toggleFlashlight)
-	local flareBtn = touchButton("FLARE", -350)
-	flareBtn.Activated:Connect(function() fireFlare() end)
-	local invBtn = touchButton("INV", -450)
-	invBtn.Activated:Connect(function() setInventory(not invOpen) end)
-end
-
--- monster events
-local function onHit()
-	flash.BackgroundTransparency = 0.3
-	TweenService:Create(flash, TweenInfo.new(0.7), {BackgroundTransparency = 1}):Play()
-	shake = 1
-	staticBurst = 1
-	if hitSnd then hitSnd:Play() end
-	if scareSnd then scareSnd:Play() end
-end
-
-local function onSpotted()
-	staticBurst = 1
-	shake = math.max(shake, 0.5)
-	glitch = 1
-	if scareSnd then scareSnd:Play() end
-end
-
--- random "tracking glitches"
-task.spawn(function()
-	while gui.Parent do
-		task.wait(math.random(40, 100) / 10 / (1 + eff * 4))
-		bar.Visible = true
-		bar.Position = UDim2.new(0, 0, -0.05, 0)
-		local dur = 0.5 + math.random() * 0.6
-		TweenService:Create(bar, TweenInfo.new(dur, Enum.EasingStyle.Linear), {
-			Position = UDim2.new(0, 0, 1.02, 0),
-		}):Play()
-		glitch = 1
-		task.wait(dur)
-		bar.Visible = false
-	end
-end)
-
-------------------------------------------------------------
--- 5. MONSTER (local, only you can see it)
-------------------------------------------------------------
-local function buildMonster()
-	local S = CONFIG.MonsterScale
+local function buildMonster(scale)
+	local S = scale or CONFIG.MonsterScale
 	local maroon = Color3.fromRGB(66, 40, 44)
 	local maroonLight = Color3.fromRGB(88, 58, 58)
 	local darkBody = Color3.fromRGB(38, 29, 33)
@@ -1017,58 +610,75 @@ local function buildMonster()
 	local hit = s3d(CONFIG.Sounds.Hit, {Volume = 2, PlaybackSpeed = 0.7})
 
 	----------------------------------------------------------
-	-- ANIMATION: walk, RUN (when chasing), crouch (creeping behind you), stun
+	-- ANIMATION: walk, CRAWL on legs and arms (chasing), crouch-creep (stalking), stun, emerge
 	----------------------------------------------------------
 	local t, phase = 0, 0
 	local eyesBright = true
-	local runK, crouchK = 0, 0
+	local runK, crawlK, crouchK = 0, 0, 0
 	local lastHip = STAND_HIP
+	local CRAWL_HIP = 4.9      -- hip height while crawling (torso almost horizontal, limbs on the ground)
+	local silent = false
+	local rumbleBase = rumble and rumble.Volume or 0
+	local useCrawl = CONFIG.Features.CrawlAnimation
+
+	local function setSilent(v)
+		silent = v and true or false
+	end
 
 	local function update(dt, speed, state, attackT, stunned)
 		t += dt
 		local chasing = (state == "chase" or state == "strike" or state == "kill")
+		local moving = speed > 5
+		local crawling = chasing and moving and useCrawl and not stunned
+		local running = chasing and moving and (not useCrawl) and speed > 12
 		local crouching = (state == "stalk" or state == "emerge") and not stunned
 
-		-- smooth blending between walk, run and crouch
-		local runTarget = (chasing and speed > 12) and 1 or 0
-		runK += (runTarget - runK) * math.min(dt * 8, 1)
+		-- smooth blending between the poses
+		crawlK += ((crawling and 1 or 0) - crawlK) * math.min(dt * 7, 1)
+		runK += ((running and 1 or 0) - runK) * math.min(dt * 8, 1)
 		crouchK += ((crouching and 1 or 0) - crouchK) * math.min(dt * 6, 1)
 
-		local k = math.clamp(speed / CONFIG.MonsterChaseSpeed, 0, 1)
-		phase += dt * speed * (0.28 + 0.22 * runK + 0.1 * crouchK)
+		local k = math.clamp(speed / CONFIG.MonsterChaseSpeed, 0, 1.3)
+		phase += dt * speed * (0.28 + 0.2 * runK + 0.17 * crawlK + 0.1 * crouchK)
 		local sw = math.sin(phase)
-		local stride = 0.5 + 0.45 * runK - 0.15 * crouchK
+		local stride = 0.5 + 0.45 * runK - 0.1 * crawlK - 0.15 * crouchK
 
-		-- legs: wide stride and high knee lift when running, almost folded in half when crouching
+		-- legs: when crawling the thighs point forward and the shins fold back (spider-like hind legs)
+		local splay = 0.12 + 0.2 * crawlK
 		for _, side in ipairs({-1, 1}) do
 			local L = legs[side]
 			local ph = phase + (side < 0 and 0 or math.pi)
-			local hipX = 0.05 + (1.0 - 0.05) * crouchK + math.sin(ph) * stride * k
-			local kneeX = -0.12 + (-1.9 + 0.12) * crouchK - math.max(0, math.cos(ph)) * (0.6 + 0.6 * runK) * k
-			L.hip.C0 = L.hipPos * CFrame.Angles(hipX, 0, side * 0.12)
-			L.knee.C0 = L.kneePos * CFrame.Angles(kneeX, 0, -side * 0.12)
+			local hipX = 0.05 + (1.0 - 0.05) * crouchK + (1.1 - 0.05) * crawlK + math.sin(ph) * stride * k
+			local kneeX = -0.12 + (-1.9 + 0.12) * crouchK + (-2.0 + 0.12) * crawlK
+				- math.max(0, math.cos(ph)) * (0.6 + 0.6 * runK + 0.2 * crawlK) * k
+			L.hip.C0 = L.hipPos * CFrame.Angles(hipX, 0, side * splay)
+			L.knee.C0 = L.kneePos * CFrame.Angles(kneeX, 0, -side * splay)
 		end
 
-		-- hip height: when crouching the monster lowers to the ground
-		local hipH = STAND_HIP + (CROUCH_HIP - STAND_HIP) * crouchK
+		-- hip height: crouching and crawling lower the monster to the ground
+		local hipH = STAND_HIP + (CROUCH_HIP - STAND_HIP) * crouchK + (CRAWL_HIP - STAND_HIP) * crawlK
 		if math.abs(hipH - lastHip) > 0.01 then
 			lastHip = hipH
 			humanoid.HipHeight = hipH * S
 		end
 
-		-- arms: hang to the ground; swing wide when running; brace forward like an animal when crouching
+		-- arms: hang to the ground; when crawling they reach far forward and claw the ground in a
+		-- diagonal gait (left arm with right leg); in a crouch they brace forward like an animal
 		for _, side in ipairs({-1, 1}) do
 			local A = arms[side]
-			local swingX = (side < 0 and -sw or sw) * (0.3 + 0.7 * runK) * k
+			local phA = phase + (side < 0 and math.pi or 0)
+			local swingX = math.sin(phA) * (0.3 + 0.7 * runK + 0.15 * crawlK) * k
 			local spread, elbowX = 0.55, 0
 			if chasing then
-				swingX += 0.25
+				swingX += 0.25 * (1 - crawlK)
 				spread = 0.8 + 0.2 * runK
 				elbowX = 0.5 * runK
 			end
-			swingX += 0.9 * crouchK
+			swingX += 0.9 * crouchK + 2.25 * crawlK
+			spread += (0.3 - spread) * crawlK
+			elbowX += (0.15 + math.max(0, math.cos(phA)) * 0.5 * k) * crawlK
 			if attackT > 0 then
-				swingX = 1.3
+				swingX = 1.3 + 0.95 * crawlK
 				spread = 0.3
 				elbowX = 0.3
 			end
@@ -1087,15 +697,19 @@ local function buildMonster()
 			A.el.C0 = A.elPos * CFrame.Angles(elbowX, 0, -side * (spread + 0.05))
 		end
 
-		-- torso: leans forward when running and crouching; head tilted up to watch the target
-		local lean = 0.2 * runK + 0.3 * crouchK
-		jAbd.C0 = abdBase * CFrame.Angles(-lean + math.sin(t * 1.5) * 0.02, sw * 0.08 * k, 0)
-		jChest.C0 = chestBase * CFrame.Angles(-lean * 1.5 + math.sin(t * 1.5 + 1) * 0.02, sw * (0.1 + 0.1 * runK) * k, 0)
-		jNeck.C0 = neckBase * CFrame.Angles(0.2 * runK + 0.4 * crouchK + math.sin(t * 0.9) * 0.05, 0, math.sin(t * 0.5) * 0.05)
-		local twitch = (chasing and math.sin(t * 23) * 0.06 or 0) + (stunned and math.sin(t * 32) * 0.3 or 0) + (state == "emerge" and math.sin(t * 27) * 0.25 or 0)
-		jHead.C0 = headBase * CFrame.Angles(0.2 * runK + 0.4 * crouchK, math.sin(t * 1.1) * 0.12 + twitch, math.sin(t * 0.6) * 0.14)
+		-- torso: leans far forward when crawling; the neck and head tilt back up to watch the target
+		local abdLean = 0.2 * runK + 0.3 * crouchK + 0.45 * crawlK
+		local chestLean = 0.3 * runK + 0.45 * crouchK + 0.75 * crawlK
+		jAbd.C0 = abdBase * CFrame.Angles(-abdLean + math.sin(t * 1.5) * 0.02, sw * (0.08 + 0.12 * crawlK) * k, 0)
+		jChest.C0 = chestBase * CFrame.Angles(-chestLean + math.sin(t * 1.5 + 1) * 0.02, sw * (0.1 + 0.1 * runK) * k, 0)
+		jNeck.C0 = neckBase * CFrame.Angles(0.2 * runK + 0.4 * crouchK + 0.65 * crawlK + math.sin(t * 0.9) * 0.05, 0, math.sin(t * 0.5) * 0.05)
 
-		-- mouth: opens when chasing and attacking
+		local twitch = (chasing and math.sin(t * 23) * 0.06 or 0)
+			+ (stunned and math.sin(t * 32) * 0.3 or 0)
+			+ (state == "emerge" and math.sin(t * 27) * 0.25 or 0)
+		jHead.C0 = headBase * CFrame.Angles(0.2 * runK + 0.4 * crouchK + 0.45 * crawlK, math.sin(t * 1.1) * 0.12 + twitch, math.sin(t * 0.6) * 0.14)
+
+		-- mouth
 		local open
 		if attackT > 0 or stunned or state == "emerge" then
 			open = -0.9
@@ -1106,10 +720,10 @@ local function buildMonster()
 		end
 		jJaw.C0 = jawBase * CFrame.Angles(open, 0, 0)
 
-		-- hair sways
+		-- hair sways and streams back when moving fast
 		for _, st in ipairs(strands) do
 			st.joint.C0 = st.base * CFrame.Angles(
-				math.sin(t * 1.3 + st.seed) * 0.12 + sw * 0.15 * k - 0.3 * runK,
+				math.sin(t * 1.3 + st.seed) * 0.12 + sw * 0.15 * k - 0.3 * (runK + crawlK),
 				0,
 				math.sin(t * 0.9 + st.seed * 2) * 0.1)
 		end
@@ -1123,12 +737,15 @@ local function buildMonster()
 			end
 		end
 
+		-- sounds: footsteps and rumble are muted while the monster is silent (behind you)
+		local vol = silent and 0 or 1
 		if steps then
 			local want = speed > 3
 			if steps.Playing ~= want then steps.Playing = want end
 			steps.PlaybackSpeed = 0.4 + speed / 70
-			steps.Volume = 2.5 * (1 - 0.75 * crouchK) -- creeps almost silently
+			steps.Volume = 2.5 * (1 - 0.75 * crouchK) * (1 + 0.3 * crawlK) * vol
 		end
+		if rumble then rumble.Volume = rumbleBase * vol end
 	end
 
 	return {
@@ -1136,11 +753,1083 @@ local function buildMonster()
 		humanoid = humanoid,
 		root = root,
 		update = update,
+		setSilent = setSilent,
 		roar = roar,
 		hit = hit,
 	}
 end
 
+
+------------------------------------------------------------
+-- LOBBY (hub): the monster stands in the center, the forest is behind it.
+-- Buttons: PLAY (starts the game) and STOP (stops the script and deletes it).
+-- Version and the feature list are shown in the right corner.
+------------------------------------------------------------
+local FEATURE_ORDER = {"VHSOverlay", "Flicker", "AmbientSounds", "Hallucinations", "FakeFootsteps", "ScreenGlitches",
+	"CameraShake", "Jumpscares", "KillAnimations", "AdaptiveSpeed", "Difficulty", "Stalking", "SilentBehind",
+	"CrawlAnimation", "Decoy", "Teleport", "Items", "FlareGun", "Inventory", "PlayerFootsteps", "Heartbeat", "Sprint"}
+
+local FEATURE_LABELS = {
+	VHSOverlay = "Old camera (VHS) overlay",
+	Flicker = "Flashlight flickering",
+	AmbientSounds = "Creepy ambient sounds",
+	Hallucinations = "Random hallucinations",
+	FakeFootsteps = "Fake footsteps",
+	ScreenGlitches = "Screen glitches",
+	CameraShake = "Camera shake",
+	Jumpscares = "Jumpscares",
+	KillAnimations = "Kill animations (3 kinds)",
+	AdaptiveSpeed = "Adaptive monster speed",
+	Difficulty = "Difficulty rising over time",
+	Stalking = "Stalking from behind",
+	SilentBehind = "Silent when behind you",
+	CrawlAnimation = "Crawling chase",
+	Decoy = "Fake player decoy",
+	Teleport = "Catch-up teleport",
+	Items = "Items on the map",
+	FlareGun = "Flare gun (stuns the monster)",
+	Inventory = "Inventory",
+	PlayerFootsteps = "Player footsteps",
+	Heartbeat = "Heartbeat",
+	Sprint = "Sprint + stamina",
+}
+
+local Hub = {}
+Hub.__index = Hub
+
+function Hub.build(callbacks)
+	local self = setmetatable({}, Hub)
+	self.conns = {}
+	self.sounds = {}
+	self.alive = true
+
+	local cam = workspace.CurrentCamera
+	local L = CONFIG.Lobby
+	local origin = L.Origin
+
+	-- remember everything the lobby changes so it can be restored exactly
+	self.saved = {
+		camType = cam.CameraType,
+		fov = cam.FieldOfView,
+		lighting = snapshotLighting(),
+	}
+	self.stashed = stashLightingObjects()
+
+	-- the character stands still while you are in the lobby
+	local ch = player.Character
+	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+	local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+	self.frozen = {hum = hum, hrp = hrp}
+	if hum then
+		self.frozen.walk, self.frozen.jumpPower, self.frozen.jumpHeight = hum.WalkSpeed, hum.JumpPower, hum.JumpHeight
+		hum.WalkSpeed, hum.JumpPower, hum.JumpHeight = 0, 0, 0
+	end
+	if hrp then
+		self.frozen.anchored = hrp.Anchored
+		hrp.Anchored = true
+	end
+
+	----------------------------------------------------------
+	-- 3D scene (far above the map): ground, forest, moon, monster, lights
+	----------------------------------------------------------
+	local folder = Instance.new("Folder")
+	folder.Name = "HorrorLobby"
+	folder.Parent = workspace
+	self.folder = folder
+
+	local rng = Random.new(77)
+	local function P(size, cf, color, material, shape)
+		local p = Instance.new("Part")
+		p.Anchored = true
+		p.CanCollide = false
+		p.CanQuery = false
+		p.CanTouch = false
+		p.Size = size
+		p.CFrame = cf
+		p.Color = color
+		p.Material = material or Enum.Material.Slate
+		if shape then p.Shape = shape end
+		p.TopSurface = Enum.SurfaceType.Smooth
+		p.BottomSurface = Enum.SurfaceType.Smooth
+		p.Parent = folder
+		return p
+	end
+
+	P(Vector3.new(800, 2, 800), CFrame.new(origin.X, origin.Y - 1, origin.Z - 200), Color3.fromRGB(14, 22, 14), Enum.Material.Grass)
+
+	local trunkColor = Color3.fromRGB(30, 22, 18)
+	local leafColor = Color3.fromRGB(14, 32, 20)
+	local function tree(x, z)
+		local h = rng:NextNumber(26, 46)
+		local th = rng:NextNumber(2.2, 4)
+		P(Vector3.new(h, th, th), CFrame.new(origin.X + x, origin.Y + h / 2, origin.Z + z) * CFrame.Angles(0, 0, math.rad(90)),
+			trunkColor, Enum.Material.Wood, Enum.PartType.Cylinder)
+		local r = rng:NextNumber(14, 22)
+		P(Vector3.new(r, r, r), CFrame.new(origin.X + x, origin.Y + h - 2, origin.Z + z), leafColor, Enum.Material.LeafyGrass, Enum.PartType.Ball)
+		local r2 = r * 0.75
+		P(Vector3.new(r2, r2, r2), CFrame.new(origin.X + x + rng:NextNumber(-3, 3), origin.Y + h - 8, origin.Z + z + rng:NextNumber(-3, 3)),
+			leafColor, Enum.Material.LeafyGrass, Enum.PartType.Ball)
+	end
+
+	-- the forest behind the monster
+	for _ = 1, L.Trees do
+		local x = rng:NextNumber(-160, 160)
+		local z = -rng:NextNumber(16, 240)
+		if not (math.abs(x) < 6 and z > -30) then tree(x, z) end
+	end
+	-- a few trees framing the scene on both sides
+	for i = 1, 10 do
+		local side = (i % 2 == 0) and 1 or -1
+		tree(side * rng:NextNumber(32, 60), rng:NextNumber(-34, 16))
+	end
+
+	-- a pale moon
+	P(Vector3.new(60, 60, 60), CFrame.new(origin.X - 70, origin.Y + 110, origin.Z - 260), Color3.fromRGB(205, 215, 235), Enum.Material.Neon, Enum.PartType.Ball)
+
+	-- the monster, standing still and breathing, facing the camera
+	local m = buildMonster()
+	for _, d in ipairs(m.model:GetDescendants()) do
+		if d:IsA("Sound") then d:Destroy() end
+	end
+	m.root.Anchored = true
+	m.model.Parent = folder
+	m.root.CFrame = CFrame.new(origin.X, origin.Y + 10.1 * CONFIG.MonsterScale, origin.Z) * CFrame.Angles(0, math.pi, 0)
+
+	-- cold key light from the front, faint red rim light behind the monster
+	local keyPart = P(Vector3.new(1, 1, 1), CFrame.lookAt(origin + Vector3.new(10, 26, 36), origin + Vector3.new(0, 7, 0)), Color3.new(0, 0, 0), Enum.Material.SmoothPlastic)
+	keyPart.Transparency = 1
+	new("SpotLight", {Face = Enum.NormalId.Front, Range = 110, Angle = 55, Brightness = 2.4, Color = Color3.fromRGB(165, 185, 230), Shadows = true}, keyPart, true)
+	local rimPart = P(Vector3.new(1, 1, 1), CFrame.new(origin + Vector3.new(0, 9, -10)), Color3.new(0, 0, 0), Enum.Material.SmoothPlastic)
+	rimPart.Transparency = 1
+	new("PointLight", {Color = Color3.fromRGB(255, 50, 35), Range = 40, Brightness = 1.6}, rimPart, true)
+
+	-- lobby atmosphere
+	local lobbyLight = {
+		ClockTime = 0, Brightness = 0.05,
+		Ambient = Color3.fromRGB(16, 20, 30), OutdoorAmbient = Color3.fromRGB(16, 20, 30),
+		ColorShift_Top = Color3.new(0, 0, 0), ColorShift_Bottom = Color3.new(0, 0, 0),
+		GlobalShadows = true, EnvironmentDiffuseScale = 0.1, EnvironmentSpecularScale = 0,
+		FogColor = Color3.fromRGB(6, 8, 12), FogStart = 40, FogEnd = 330,
+	}
+	for k, v in pairs(lobbyLight) do
+		pcall(function() Lighting[k] = v end)
+	end
+
+	local drone = makeSound(workspace, CONFIG.Sounds.Ambient, {Looped = true, Volume = 0.3, PlaybackSpeed = 0.3})
+	if drone then
+		addReverb(drone, -3)
+		drone:Play()
+		table.insert(self.sounds, drone)
+	end
+	local clickSnd = makeSound(workspace, CONFIG.Sounds.Click, {Volume = 0.6})
+	if clickSnd then table.insert(self.sounds, clickSnd) end
+
+	----------------------------------------------------------
+	-- camera: slow drifting shot of the monster
+	----------------------------------------------------------
+	local t0 = os.clock()
+	table.insert(self.conns, RunService.RenderStepped:Connect(function()
+		local t = os.clock() - t0
+		cam = workspace.CurrentCamera
+		cam.CameraType = Enum.CameraType.Scriptable
+		local sway = Vector3.new(math.sin(t * 0.21) * 1.4, math.sin(t * 0.13) * 0.5, math.sin(t * 0.17) * 0.8)
+		local pos = origin + Vector3.new(0, 8, 34) + sway
+		cam.CFrame = CFrame.lookAt(pos, origin + Vector3.new(0, 8.5, 0)) * CFrame.Angles(0, 0, math.sin(t * 0.11) * 0.015)
+		cam.FieldOfView = 52
+	end))
+	table.insert(self.conns, RunService.Heartbeat:Connect(function(dt)
+		m.update(dt, 0, "patrol", 0, false)
+	end))
+
+	----------------------------------------------------------
+	-- UI
+	----------------------------------------------------------
+	local gui = new("ScreenGui", {
+		Name = "HorrorHub",
+		IgnoreGuiInset = true,
+		ResetOnSpawn = false,
+		DisplayOrder = 200,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, playerGui)
+	self.gui = gui
+
+	-- vignette
+	local function vig(pos, size, rot)
+		local f = new("Frame", {Position = pos, Size = size, BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.2, BorderSizePixel = 0}, gui)
+		new("UIGradient", {Rotation = rot, Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1)})}, f)
+	end
+	vig(UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0.3, 0), 90)
+	vig(UDim2.new(0, 0, 0.7, 0), UDim2.new(1, 0, 0.3, 0), 270)
+	vig(UDim2.new(0, 0, 0, 0), UDim2.new(0.22, 0, 1, 0), 0)
+	vig(UDim2.new(0.78, 0, 0, 0), UDim2.new(0.22, 0, 1, 0), 180)
+
+	new("TextLabel", {
+		AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 36), Size = UDim2.fromOffset(700, 90),
+		BackgroundTransparency = 1, Text = "HORROR MODE", Font = Enum.Font.Creepster, TextSize = 78,
+		TextColor3 = Color3.fromRGB(215, 40, 35), TextStrokeTransparency = 0.3,
+	}, gui)
+	new("TextLabel", {
+		AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 122), Size = UDim2.fromOffset(700, 28),
+		BackgroundTransparency = 1, Text = "Don't turn around.", Font = Enum.Font.GothamMedium, TextSize = 20,
+		TextColor3 = Color3.fromRGB(200, 205, 215), TextStrokeTransparency = 0.6,
+	}, gui)
+
+	local function makeButton(text, pos, color, onClick)
+		local b = new("TextButton", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = pos, Size = UDim2.fromOffset(210, 58),
+			BackgroundColor3 = color, BackgroundTransparency = 0.2, AutoButtonColor = false,
+			Text = text, Font = Enum.Font.GothamBold, TextSize = 26, TextColor3 = Color3.new(1, 1, 1),
+		}, gui)
+		new("UICorner", {CornerRadius = UDim.new(0, 8)}, b)
+		new("UIStroke", {Color = Color3.fromRGB(235, 235, 235), Thickness = 1.5, Transparency = 0.5}, b)
+		table.insert(self.conns, b.MouseEnter:Connect(function()
+			TweenService:Create(b, TweenInfo.new(0.12), {BackgroundTransparency = 0, Size = UDim2.fromOffset(222, 62)}):Play()
+		end))
+		table.insert(self.conns, b.MouseLeave:Connect(function()
+			TweenService:Create(b, TweenInfo.new(0.12), {BackgroundTransparency = 0.2, Size = UDim2.fromOffset(210, 58)}):Play()
+		end))
+		table.insert(self.conns, b.Activated:Connect(function()
+			if clickSnd then clickSnd:Play() end
+			onClick()
+		end))
+		return b
+	end
+
+	makeButton("PLAY", UDim2.new(0.5, -120, 0.86, 0), Color3.fromRGB(40, 130, 60), function() self:play(callbacks.onPlay) end)
+	makeButton("STOP", UDim2.new(0.5, 120, 0.86, 0), Color3.fromRGB(150, 35, 35), function() self:stop(callbacks.onStop) end)
+
+	-- version and feature list in the right corner
+	local panel = new("Frame", {
+		AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -22, 0, 22), Size = UDim2.fromOffset(280, 470),
+		BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.35, BorderSizePixel = 0,
+	}, gui)
+	new("UICorner", {CornerRadius = UDim.new(0, 8)}, panel)
+	new("UIStroke", {Color = Color3.fromRGB(200, 200, 200), Thickness = 1, Transparency = 0.6}, panel)
+	new("TextLabel", {
+		Position = UDim2.new(0, 14, 0, 10), Size = UDim2.new(1, -28, 0, 26), BackgroundTransparency = 1,
+		Text = "VERSION " .. CONFIG.Version, Font = Enum.Font.GothamBold, TextSize = 22,
+		TextColor3 = Color3.fromRGB(255, 235, 170), TextXAlignment = Enum.TextXAlignment.Left,
+	}, panel)
+	new("TextLabel", {
+		Position = UDim2.new(0, 14, 0, 38), Size = UDim2.new(1, -28, 0, 20), BackgroundTransparency = 1,
+		Text = "FEATURES", Font = Enum.Font.GothamMedium, TextSize = 15,
+		TextColor3 = Color3.fromRGB(170, 175, 185), TextXAlignment = Enum.TextXAlignment.Left,
+	}, panel)
+	local list = new("ScrollingFrame", {
+		Position = UDim2.new(0, 10, 0, 62), Size = UDim2.new(1, -20, 1, -72), BackgroundTransparency = 1,
+		BorderSizePixel = 0, ScrollBarThickness = 3, CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	}, panel)
+	new("UIListLayout", {Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder}, list)
+
+	local function addRow(order, text, color)
+		new("TextLabel", {
+			LayoutOrder = order, Size = UDim2.new(1, -6, 0, 20), BackgroundTransparency = 1, Text = text,
+			Font = Enum.Font.Code, TextSize = 15, TextColor3 = color, TextXAlignment = Enum.TextXAlignment.Left,
+		}, list)
+	end
+	local order = 0
+	for _, key in ipairs(FEATURE_ORDER) do
+		order += 1
+		local label = FEATURE_LABELS[key] or key
+		if FEAT_NA[key] then
+			addRow(order, "[N/A] " .. label, Color3.fromRGB(235, 160, 60))
+		elseif FEAT[key] then
+			addRow(order, "[ON]  " .. label, Color3.fromRGB(120, 230, 130))
+		else
+			addRow(order, "[OFF] " .. label, Color3.fromRGB(130, 130, 135))
+		end
+	end
+	if not Support.Pathfinding then
+		order += 1
+		addRow(order, "[N/A] Pathfinding (direct moves)", Color3.fromRGB(235, 160, 60))
+	end
+	if not Support.Prompts then
+		order += 1
+		addRow(order, "[N/A] Prompts (use [E] to pick up)", Color3.fromRGB(235, 160, 60))
+	end
+
+	-- controls
+	new("TextLabel", {
+		AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 24, 1, -20), Size = UDim2.fromOffset(520, 60),
+		BackgroundTransparency = 1, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Bottom,
+		Text = "[F] flashlight   [Shift] sprint   [I] inventory   [G] flare gun   [E] pick up\n[H] medkit   [V] energy drink   [End] quit to lobby",
+		Font = Enum.Font.Code, TextSize = 15, TextColor3 = Color3.fromRGB(190, 195, 205), TextXAlignment = Enum.TextXAlignment.Left,
+	}, gui)
+
+	-- fade overlay (used for transitions)
+	local fade = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0, BorderSizePixel = 0, ZIndex = 50}, gui)
+	self.fade = fade
+	TweenService:Create(fade, TweenInfo.new(1.0), {BackgroundTransparency = 1}):Play()
+
+	return self
+end
+
+function Hub:destroy()
+	if not self.alive then return end
+	self.alive = false
+	for _, c in ipairs(self.conns) do pcall(function() c:Disconnect() end) end
+	if self.gui then pcall(function() self.gui:Destroy() end) end
+	if self.folder then pcall(function() self.folder:Destroy() end) end
+	for _, s in ipairs(self.sounds) do pcall(function() s:Destroy() end) end
+
+	unstashLightingObjects(self.stashed or {})
+	restoreLighting(self.saved.lighting)
+
+	local cam = workspace.CurrentCamera
+	pcall(function()
+		cam.CameraType = Enum.CameraType.Custom
+		cam.FieldOfView = self.saved.fov
+	end)
+
+	local f = self.frozen
+	if f.hum and f.hum.Parent then
+		f.hum.WalkSpeed, f.hum.JumpPower, f.hum.JumpHeight = f.walk or 16, f.jumpPower or 50, f.jumpHeight or 7.2
+	end
+	if f.hrp and f.hrp.Parent then
+		f.hrp.Anchored = f.anchored or false
+	end
+end
+
+-- PLAY: fade to black, tear the lobby down and start the game (the game fades back in)
+function Hub:play(onPlay)
+	if self.busy then return end
+	self.busy = true
+	local tw = TweenService:Create(self.fade, TweenInfo.new(0.6), {BackgroundTransparency = 0})
+	tw:Play()
+	tw.Completed:Wait()
+	self:destroy()
+	onPlay()
+end
+
+-- STOP: fade to black and shut everything down
+function Hub:stop(onStop)
+	if self.busy then return end
+	self.busy = true
+	local tw = TweenService:Create(self.fade, TweenInfo.new(0.5), {BackgroundTransparency = 0})
+	tw:Play()
+	tw.Completed:Wait()
+	onStop()
+end
+
+
+------------------------------------------------------------
+-- GAME SESSION
+-- startGame() builds the whole game. It returns nothing; the session is ended with stopGame(),
+-- which disconnects every connection, destroys everything it created and restores the game.
+------------------------------------------------------------
+local function startGame(opts)
+	opts = opts or {}
+	local alive = true
+	local conns = {}
+	local function C(signal, fn)
+		local c = signal:Connect(fn)
+		table.insert(conns, c)
+		return c
+	end
+
+	local camera = workspace.CurrentCamera
+
+	-- quality: a mutable copy of the preset (the auto-quality system can lower it while playing)
+	local QUALITY_ORDER = {"High", "Medium", "Low"}
+	local qualityName = CONFIG.QualityPresets[CONFIG.Quality] and CONFIG.Quality or "Medium"
+	local Q = {}
+	for k, v in pairs(CONFIG.QualityPresets[qualityName]) do Q[k] = v end
+
+	-- everything the game changes is remembered here so Stop can put it back
+	local saved = {
+		cameraMode = player.CameraMode,
+		fov = camera.FieldOfView,
+		lighting = snapshotLighting(),
+		stashed = {},
+		lights = setmetatable({}, {__mode = "k"}),
+		walkSpeed = nil,
+	}
+
+	-- forward declarations shared by the layers
+	local stopGame
+	local FX = {}                 -- the FX API: the only thing gameplay code uses for visuals and audio
+	local itemRegistry = {}       -- items for the [E] pickup fallback (when ProximityPrompts are unsupported)
+	local pickupNearest = function() end
+	local lastDim = 1
+	local fpsT, fpsN = 0, 0
+
+	-- difficulty rises with time; Diff.get("Speed") etc. return the current multiplier
+	local Diff = {t0 = os.clock()}
+	function Diff.level()
+		if not FEAT.Difficulty then return 0 end
+		return math.clamp((os.clock() - Diff.t0) / CONFIG.Difficulty.RampSeconds, 0, 1)
+	end
+	function Diff.get(name)
+		local r = CONFIG.Difficulty[name]
+		if not FEAT.Difficulty or type(r) ~= "table" then return 1 end
+		return r[1] + (r[2] - r[1]) * Diff.level()
+	end
+
+	------------------------------------------------------------
+	-- 1. DARKNESS AND FOG (values are held even if the game tries to change them)
+	------------------------------------------------------------
+	if CONFIG.FirstPerson then
+		pcall(function()
+			player.CameraMode = Enum.CameraMode.LockFirstPerson
+		end)
+	end
+
+	local function applyLightingProps()
+		pcall(function()
+			Lighting.ClockTime = 0
+			Lighting.Brightness = 0
+			Lighting.Ambient = Color3.new(0, 0, 0)
+			Lighting.OutdoorAmbient = Color3.new(0, 0, 0)
+			Lighting.ColorShift_Top = Color3.new(0, 0, 0)
+			Lighting.ColorShift_Bottom = Color3.new(0, 0, 0)
+			Lighting.GlobalShadows = true
+			Lighting.EnvironmentDiffuseScale = 0
+			Lighting.EnvironmentSpecularScale = 0
+			Lighting.FogColor = Color3.new(0, 0, 0)
+			Lighting.FogStart = 0
+			Lighting.FogEnd = CONFIG.FogEnd
+		end)
+	end
+
+	-- the game's own sky/atmosphere/effects are moved out (and restored on Stop)
+	saved.stashed = stashLightingObjects()
+	C(Lighting.ChildAdded, function(c)
+		task.defer(function()
+			if alive and (c:IsA("Sky") or c:IsA("Atmosphere") or c:IsA("PostEffect")) and not c:GetAttribute("HorrorKeep") then
+				table.insert(saved.stashed, c)
+				c.Parent = nil
+			end
+		end)
+	end)
+
+	new("Sky", {
+		SkyboxBk = "", SkyboxDn = "", SkyboxFt = "",
+		SkyboxLf = "", SkyboxRt = "", SkyboxUp = "",
+		StarCount = 0,
+		CelestialBodiesShown = false,
+	}, Lighting, true)
+
+	new("Atmosphere", {
+		Density = 0.55,
+		Offset = 0,
+		Color = Color3.new(0, 0, 0),
+		Decay = Color3.new(0, 0, 0),
+		Glare = 0,
+		Haze = 10,
+	}, Lighting, true)
+
+	applyLightingProps()
+	task.spawn(function()
+		while alive do
+			task.wait(1)
+			applyLightingProps()
+		end
+	end)
+
+	if CONFIG.DisableMapLights then
+		local function killLight(obj)
+			if (obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight"))
+				and not obj:GetAttribute("HorrorKeep") and obj.Enabled then
+				saved.lights[obj] = true
+				obj.Enabled = false
+			end
+		end
+		for _, o in ipairs(workspace:GetDescendants()) do killLight(o) end
+		C(workspace.DescendantAdded, killLight)
+	end
+
+------------------------------------------------------------
+-- 2. SOUNDS (global)
+------------------------------------------------------------
+local ambient = makeSound(SoundService, CONFIG.Sounds.Ambient, {Looped = true, Volume = 0.35, PlaybackSpeed = 0.3})
+addReverb(ambient, -3)
+if ambient then ambient:Play() end
+
+local beat = makeSound(SoundService, CONFIG.Sounds.Heartbeat, {Volume = 0.5, PlaybackSpeed = 0.6})
+local clickSnd = makeSound(SoundService, CONFIG.Sounds.Click, {Volume = 0.8})
+local scareSnd = makeSound(SoundService, CONFIG.Sounds.Scare, {Volume = 0.6, PlaybackSpeed = 0.5})
+addDistortion(scareSnd, 0.5)
+local hitSnd = makeSound(SoundService, CONFIG.Sounds.Hit, {Volume = 1, PlaybackSpeed = 0.7})
+local shotSnd = makeSound(SoundService, CONFIG.Sounds.FlareShot, {Volume = 1})
+local pickSnd = makeSound(SoundService, CONFIG.Sounds.Pickup, {Volume = 0.9, PlaybackSpeed = 1.3})
+local invOpenSnd = makeSound(SoundService, CONFIG.Sounds.InvOpen, {Volume = 0.8, PlaybackSpeed = 0.7})
+local invCloseSnd = makeSound(SoundService, CONFIG.Sounds.InvClose, {Volume = 0.7, PlaybackSpeed = 1.3})
+local stepSnd = makeSound(SoundService, CONFIG.Sounds.Walk, {Looped = true, Volume = 0})
+
+------------------------------------------------------------
+-- 3. OLD CAMERA EFFECTS
+------------------------------------------------------------
+local cc = safeNew("ColorCorrectionEffect", {
+	Name = "OldCamCC",
+	Saturation = -0.35,
+	Contrast = 0.25,
+	Brightness = -0.02,
+	TintColor = Color3.fromRGB(225, 235, 215),
+}, Lighting, true)
+local blur = safeNew("BlurEffect", {Name = "OldCamBlur", Size = 1.5}, Lighting, true)
+local bloom = safeNew("BloomEffect", {Name = "OldCamBloom", Intensity = 0.7, Size = 28, Threshold = 0.85}, Lighting, true)
+
+local gui = new("ScreenGui", {
+	Name = "OldCamera",
+	IgnoreGuiInset = true,
+	ResetOnSpawn = false,
+	DisplayOrder = 50,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+
+-- vignette
+local vignette = {}
+local function vigEdge(pos, size, rot)
+	local f = new("Frame", {
+		Position = pos,
+		Size = size,
+		BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 0.35,
+		BorderSizePixel = 0,
+	}, gui)
+	new("UIGradient", {
+		Rotation = rot,
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0),
+			NumberSequenceKeypoint.new(1, 1),
+		}),
+	}, f)
+	table.insert(vignette, f)
+end
+vigEdge(UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0.3, 0), 90)
+vigEdge(UDim2.new(0, 0, 0.7, 0), UDim2.new(1, 0, 0.3, 0), 270)
+vigEdge(UDim2.new(0, 0, 0, 0), UDim2.new(0.25, 0, 1, 0), 0)
+vigEdge(UDim2.new(0.75, 0, 0, 0), UDim2.new(0.25, 0, 1, 0), 180)
+
+-- scanlines
+local lines = new("Frame", {
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+}, gui)
+do
+	local vp = camera.ViewportSize
+	for y = -6, ((Q.Scanlines > 0) and vp.Y or -7), math.max(Q.Scanlines, 1) do
+		new("Frame", {
+			Position = UDim2.new(0, 0, 0, y),
+			Size = UDim2.new(1, 0, 0, 2),
+			BackgroundColor3 = Color3.new(0, 0, 0),
+			BackgroundTransparency = 0.85,
+			BorderSizePixel = 0,
+		}, lines)
+	end
+end
+
+-- grain / static
+local dots = {}
+for i = 1, Q.Dots do
+	dots[i] = new("Frame", {
+		Size = UDim2.fromOffset(2, 2),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BackgroundTransparency = 0.85,
+		BorderSizePixel = 0,
+	}, gui)
+end
+
+-- VHS tracking bar
+local bar = new("Frame", {
+	Size = UDim2.new(1, 0, 0, 10),
+	BackgroundColor3 = Color3.new(1, 1, 1),
+	BackgroundTransparency = 0.88,
+	BorderSizePixel = 0,
+	Visible = false,
+}, gui)
+
+-- viewfinder frame
+local function bracket(ax, ay)
+	local x = ax == 0 and 24 or -24
+	local y = ay == 0 and 24 or -24
+	new("Frame", {
+		AnchorPoint = Vector2.new(ax, ay),
+		Position = UDim2.new(ax, x, ay, y),
+		Size = UDim2.fromOffset(34, 3),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BackgroundTransparency = 0.3,
+		BorderSizePixel = 0,
+	}, gui)
+	new("Frame", {
+		AnchorPoint = Vector2.new(ax, ay),
+		Position = UDim2.new(ax, x, ay, y),
+		Size = UDim2.fromOffset(3, 34),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BackgroundTransparency = 0.3,
+		BorderSizePixel = 0,
+	}, gui)
+end
+bracket(0, 0)
+bracket(1, 0)
+bracket(0, 1)
+bracket(1, 1)
+
+local function label(text, pos, anchor, alignX, size)
+	return new("TextLabel", {
+		BackgroundTransparency = 1,
+		Text = text,
+		Position = pos,
+		AnchorPoint = anchor,
+		Size = UDim2.fromOffset(260, 28),
+		Font = Enum.Font.Code,
+		TextSize = size or 22,
+		TextColor3 = Color3.new(1, 1, 1),
+		TextStrokeTransparency = 0.5,
+		TextXAlignment = alignX,
+	}, gui)
+end
+
+local recDot = new("Frame", {
+	Position = UDim2.new(0, 64, 0, 66),
+	Size = UDim2.fromOffset(16, 16),
+	BackgroundColor3 = Color3.fromRGB(230, 20, 20),
+	BorderSizePixel = 0,
+}, gui)
+new("UICorner", {CornerRadius = UDim.new(1, 0)}, recDot)
+label("REC", UDim2.new(0, 88, 0, 60), Vector2.new(0, 0), Enum.TextXAlignment.Left)
+local timeLabel = label("00:00:00", UDim2.new(0, 64, 0, 90), Vector2.new(0, 0), Enum.TextXAlignment.Left)
+label("CAM 01", UDim2.new(1, -64, 0, 60), Vector2.new(1, 0), Enum.TextXAlignment.Right)
+label(os.date("%d.%m.%Y"), UDim2.new(1, -64, 1, -90), Vector2.new(1, 1), Enum.TextXAlignment.Right, 20)
+label("BAT [|||  ]", UDim2.new(0, 64, 1, -90), Vector2.new(0, 1), Enum.TextXAlignment.Left, 20)
+
+-- red flash on hit
+local flash = new("Frame", {
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = Color3.fromRGB(170, 0, 0),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+}, gui)
+
+-- stamina bar
+local staminaBack = new("Frame", {
+	AnchorPoint = Vector2.new(0.5, 1),
+	Position = UDim2.new(0.5, 0, 1, -50),
+	Size = UDim2.fromOffset(220, 6),
+	BackgroundColor3 = Color3.new(0, 0, 0),
+	BackgroundTransparency = 0.5,
+	BorderSizePixel = 0,
+	Visible = false,
+}, gui)
+local staminaFill = new("Frame", {
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = Color3.new(1, 1, 1),
+	BackgroundTransparency = 0.15,
+	BorderSizePixel = 0,
+}, staminaBack)
+
+-- flare hint, notifications, fade-out on death
+local flareLabel = label("", UDim2.new(0.5, 0, 1, -110), Vector2.new(0.5, 1), Enum.TextXAlignment.Center, 20)
+flareLabel.Size = UDim2.fromOffset(460, 28)
+flareLabel.Visible = false
+
+local toast = label("", UDim2.new(0.5, 0, 0.78, 0), Vector2.new(0.5, 0.5), Enum.TextXAlignment.Center, 22)
+toast.Size = UDim2.fromOffset(560, 30)
+toast.TextTransparency = 1
+toast.TextStrokeTransparency = 1
+
+local killFade = new("Frame", {
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = Color3.new(0, 0, 0),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	ZIndex = 20,
+}, gui)
+
+local toastToken = 0
+local function showToast(text)
+	toastToken += 1
+	local my = toastToken
+	toast.Text = text
+	toast.TextTransparency = 0
+	toast.TextStrokeTransparency = 0.5
+	task.delay(2.5, function()
+		if toastToken == my then
+			TweenService:Create(toast, TweenInfo.new(0.6), {TextTransparency = 1, TextStrokeTransparency = 1}):Play()
+		end
+	end)
+end
+
+------------------------------------------------------------
+-- 4. STATE, FLASHLIGHT, INPUT
+------------------------------------------------------------
+local currentMonster = nil      -- {model, root}
+local stamina, exhausted, sprintHeld = 1, false, false
+local intensity, staticBurst, glitch, shake = 0, 0, 0, 0
+local eff = 0
+local bobT, fov = 0, 75
+local beatT = 1
+local noiseT, secT = 0, 0
+local startTime = os.time()
+local flashCF = camera.CFrame
+local flashOn = true
+local flickerUntil = 0
+local flickerCheck = 0
+local killing = false
+local hasFlareGun = false
+local flares = 0
+local fireFlare = function() end
+local refreshInventory = function() end
+
+local function updateFlareHud()
+	flareLabel.Visible = hasFlareGun or flares > 0
+	if hasFlareGun then
+		flareLabel.Text = string.format("FLARE GUN: %d   [G]", flares)
+	else
+		flareLabel.Text = string.format("FLARES: %d  (Flare Gun needed)", flares)
+	end
+	refreshInventory()
+end
+
+------------------------------------------------------------
+-- INVENTORY (key I)
+------------------------------------------------------------
+local medkits, energies = 0, 0
+local invOpen = false
+
+local useMedkit, useEnergy
+
+local invPanel = new("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(640, 340),
+	BackgroundColor3 = Color3.fromRGB(8, 10, 8),
+	BackgroundTransparency = 0.12,
+	BorderSizePixel = 0,
+	Visible = false,
+	ZIndex = 5,
+}, gui)
+new("UIStroke", {Color = Color3.fromRGB(190, 200, 180), Thickness = 1.5, Transparency = 0.4}, invPanel)
+
+-- an invisible "modal" button frees the mouse in first person while the inventory is open
+new("TextButton", {
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	Text = "",
+	Modal = true,
+	ZIndex = 5,
+}, invPanel)
+
+local function invText(text, pos, size, textSize, color, parent, align)
+	return new("TextLabel", {
+		BackgroundTransparency = 1,
+		Text = text,
+		Position = pos,
+		Size = size,
+		Font = Enum.Font.Code,
+		TextSize = textSize,
+		TextColor3 = color or Color3.new(1, 1, 1),
+		TextXAlignment = align or Enum.TextXAlignment.Center,
+		TextWrapped = true,
+		ZIndex = 6,
+	}, parent)
+end
+
+invText("INVENTORY", UDim2.new(0, 0, 0, 12), UDim2.new(1, 0, 0, 30), 26, nil, invPanel)
+invText("[" .. CONFIG.InventoryKey.Name .. "] close", UDim2.new(0, 0, 0, 40), UDim2.new(1, 0, 0, 20), 16, Color3.fromRGB(170, 175, 165), invPanel)
+local invFooter = invText("", UDim2.new(0, 0, 1, -34), UDim2.new(1, 0, 0, 26), 18, Color3.fromRGB(200, 210, 190), invPanel)
+
+local function makeCard(index, title, iconText, iconColor, hint, useCallback)
+	local card = new("Frame", {
+		Position = UDim2.new(0, 20 + (index - 1) * 152, 0, 72),
+		Size = UDim2.fromOffset(140, 210),
+		BackgroundColor3 = Color3.fromRGB(26, 30, 26),
+		BackgroundTransparency = 0.1,
+		BorderSizePixel = 0,
+		ZIndex = 6,
+	}, invPanel)
+	new("UICorner", {CornerRadius = UDim.new(0, 6)}, card)
+
+	local icon = new("Frame", {
+		Position = UDim2.new(0.5, -40, 0, 10),
+		Size = UDim2.fromOffset(80, 56),
+		BackgroundColor3 = iconColor,
+		BorderSizePixel = 0,
+		ZIndex = 7,
+	}, card)
+	new("UICorner", {CornerRadius = UDim.new(0, 6)}, icon)
+	invText(iconText, UDim2.new(0, 0, 0, 0), UDim2.fromScale(1, 1), 24, Color3.new(0, 0, 0), icon).ZIndex = 8
+
+	invText(title, UDim2.new(0, 0, 0, 74), UDim2.new(1, 0, 0, 22), 17, nil, card)
+	local count = invText("", UDim2.new(0, 0, 0, 98), UDim2.new(1, 0, 0, 28), 22, Color3.fromRGB(255, 235, 170), card)
+	invText(hint, UDim2.new(0, 6, 0, 130), UDim2.new(1, -12, 0, 32), 14, Color3.fromRGB(160, 165, 155), card)
+
+	if useCallback then
+		local btn = new("TextButton", {
+			Position = UDim2.new(0, 10, 1, -40),
+			Size = UDim2.new(1, -20, 0, 30),
+			BackgroundColor3 = Color3.fromRGB(60, 90, 60),
+			BorderSizePixel = 0,
+			Text = "USE",
+			Font = Enum.Font.Code,
+			TextSize = 15,
+			TextColor3 = Color3.new(1, 1, 1),
+			ZIndex = 8,
+		}, card)
+		new("UICorner", {CornerRadius = UDim.new(0, 4)}, btn)
+		C(btn.Activated, useCallback)
+	end
+	return {card = card, count = count}
+end
+
+local cardGun = makeCard(1, "Flare Gun", "FG", Color3.fromRGB(230, 110, 40), "Fire: [" .. CONFIG.FlareKey.Name .. "]. Stuns the monster", nil)
+local cardFlares = makeCard(2, "Flares", "FL", Color3.fromRGB(220, 50, 40), "Ammo for the Flare Gun", nil)
+local cardMedkit = makeCard(3, "Medkit", "+", Color3.fromRGB(235, 235, 235), "Heals. Quick key: [" .. CONFIG.MedkitKey.Name .. "]", function() useMedkit() end)
+local cardEnergy = makeCard(4, "Energy Drink", "EN", Color3.fromRGB(60, 220, 190), "Restores sprint. Quick key: [" .. CONFIG.EnergyKey.Name .. "]", function() useEnergy() end)
+
+refreshInventory = function()
+	cardGun.count.Text = hasFlareGun and "Have" or "None"
+	cardFlares.count.Text = "x" .. flares
+	cardMedkit.count.Text = "x" .. medkits
+	cardEnergy.count.Text = "x" .. energies
+	cardGun.card.BackgroundTransparency = hasFlareGun and 0.1 or 0.55
+	cardFlares.card.BackgroundTransparency = flares > 0 and 0.1 or 0.55
+	cardMedkit.card.BackgroundTransparency = medkits > 0 and 0.1 or 0.55
+	cardEnergy.card.BackgroundTransparency = energies > 0 and 0.1 or 0.55
+end
+refreshInventory()
+
+local quitBtn = new("TextButton", {
+	Position = UDim2.new(1, -170, 0, 12),
+	Size = UDim2.fromOffset(150, 28),
+	BackgroundColor3 = Color3.fromRGB(110, 40, 40),
+	BorderSizePixel = 0,
+	Text = "QUIT TO LOBBY",
+	Font = Enum.Font.Code,
+	TextSize = 14,
+	TextColor3 = Color3.new(1, 1, 1),
+	ZIndex = 8,
+}, invPanel)
+new("UICorner", {CornerRadius = UDim.new(0, 4)}, quitBtn)
+C(quitBtn.Activated, function()
+	if stopGame then stopGame() end
+end)
+
+local function setInventory(open)
+	if killing then open = false end
+	if open == invOpen then return end
+	invOpen = open
+	invPanel.Visible = open
+	refreshInventory()
+	if open then
+		if invOpenSnd then invOpenSnd:Play() end
+	else
+		if invCloseSnd then invCloseSnd:Play() end
+	end
+end
+
+useMedkit = function()
+	if killing then return end
+	if medkits <= 0 then
+		showToast("No medkits")
+		return
+	end
+	local ch = player.Character
+	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return end
+	if hum.Health >= hum.MaxHealth then
+		showToast("Health is already full")
+		return
+	end
+	medkits -= 1
+	hum.Health = math.min(hum.MaxHealth, hum.Health + CONFIG.MedkitHeal)
+	if pickSnd then pickSnd:Play() end
+	showToast("Medkit: +" .. CONFIG.MedkitHeal .. " HP")
+	refreshInventory()
+end
+
+useEnergy = function()
+	if killing then return end
+	if energies <= 0 then
+		showToast("No energy drinks")
+		return
+	end
+	energies -= 1
+	stamina = 1
+	exhausted = false
+	if pickSnd then pickSnd:Play() end
+	showToast("Energy drink: stamina restored")
+	refreshInventory()
+end
+
+local lightPart = new("Part", {
+	Name = "HorrorFlashlight",
+	Anchored = true,
+	CanCollide = false,
+	CanQuery = false,
+	CanTouch = false,
+	Transparency = 1,
+	Size = Vector3.new(0.2, 0.2, 0.2),
+}, nil, true)
+lightPart.Parent = camera
+
+local spot = new("SpotLight", {
+	Face = Enum.NormalId.Front,
+	Range = CONFIG.FlashlightRange,
+	Brightness = CONFIG.FlashlightBrightness,
+	Angle = CONFIG.FlashlightAngle,
+	Color = Color3.fromRGB(255, 244, 214),
+	Shadows = Q.Shadows,
+	Enabled = true,
+}, lightPart, true)
+
+local core = new("SpotLight", {
+	Face = Enum.NormalId.Front,
+	Range = CONFIG.FlashlightRange,
+	Brightness = CONFIG.FlashlightCoreBrightness,
+	Angle = CONFIG.FlashlightCoreAngle,
+	Color = Color3.fromRGB(255, 246, 225),
+	Shadows = Q.Shadows,
+	Enabled = true,
+}, lightPart, true)
+
+local function toggleFlashlight()
+	flashOn = not flashOn
+	if clickSnd then clickSnd:Play() end
+end
+
+C(UserInputService.InputBegan, function(input, gpe)
+	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+		sprintHeld = true
+	end
+	if not gpe and input.KeyCode == CONFIG.FlashlightKey then
+		toggleFlashlight()
+	elseif not gpe and input.KeyCode == CONFIG.FlareKey then
+		fireFlare()
+	elseif not gpe and input.KeyCode == CONFIG.InventoryKey and FEAT.Inventory then
+		setInventory(not invOpen)
+	elseif not gpe and input.KeyCode == CONFIG.MedkitKey then
+		useMedkit()
+	elseif not gpe and input.KeyCode == CONFIG.EnergyKey then
+		useEnergy()
+	elseif not gpe and input.KeyCode == Enum.KeyCode.E and not Support.Prompts then
+		pickupNearest()
+	end
+end)
+C(UserInputService.InputEnded, function(input)
+	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+		sprintHeld = false
+	end
+end)
+
+if UserInputService.TouchEnabled then
+	local function touchButton(text, yOffset)
+		local btn = new("TextButton", {
+			AnchorPoint = Vector2.new(1, 1),
+			Position = UDim2.new(1, -40, 1, yOffset),
+			Size = UDim2.fromOffset(90, 90),
+			BackgroundColor3 = Color3.new(0, 0, 0),
+			BackgroundTransparency = 0.4,
+			Text = text,
+			Font = Enum.Font.Code,
+			TextSize = 24,
+			TextColor3 = Color3.new(1, 1, 1),
+		}, gui)
+		new("UICorner", {CornerRadius = UDim.new(1, 0)}, btn)
+		return btn
+	end
+	local run = touchButton("RUN", -150)
+	C(run.InputBegan, function(input)
+		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+			sprintHeld = true
+		end
+	end)
+	C(run.InputEnded, function(input)
+		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+			sprintHeld = false
+		end
+	end)
+	local light = touchButton("LIGHT", -250)
+	C(light.Activated, toggleFlashlight)
+	local flareBtn = touchButton("FLARE", -350)
+	C(flareBtn.Activated, function() fireFlare() end)
+	local invBtn = touchButton("INV", -450)
+	C(invBtn.Activated, function() setInventory(not invOpen) end)
+end
+
+-- FX API (base). Gameplay code only talks to the FX table; nothing in here changes gameplay state.
+FX.sound = function(name)
+	local s = (name == "scare" and scareSnd) or (name == "hit" and hitSnd) or nil
+	if s then s:Play() end
+end
+
+FX.shake = function(amount)
+	if FEAT.CameraShake then shake = math.max(shake, amount) end
+end
+
+FX.static = function(amount)
+	staticBurst = math.max(staticBurst, amount)
+end
+
+FX.hit = function()
+	flash.BackgroundTransparency = 0.3
+	TweenService:Create(flash, TweenInfo.new(0.7), {BackgroundTransparency = 1}):Play()
+	FX.shake(1)
+	staticBurst = 1
+	FX.sound("hit")
+	FX.sound("scare")
+end
+
+FX.spotted = function()
+	staticBurst = 1
+	FX.shake(0.5)
+	glitch = 1
+	FX.sound("scare")
+end
+
+FX.flicker = function(seconds)
+	flickerUntil = math.max(flickerUntil, os.clock() + seconds)
+end
+
+FX.cinematic = function(on)
+	camera = workspace.CurrentCamera
+	if on then
+		camera.CameraType = Enum.CameraType.Scriptable
+	else
+		camera.CameraType = Enum.CameraType.Custom
+		camera.FieldOfView = 75
+	end
+end
+
+FX.camera = function(cf, fieldOfView)
+	camera.CFrame = cf
+	if fieldOfView then camera.FieldOfView = fieldOfView end
+end
+
+FX.flashRed = function(alpha)
+	flash.BackgroundTransparency = alpha
+	TweenService:Create(flash, TweenInfo.new(0.5), {BackgroundTransparency = 1}):Play()
+end
+
+FX.fade = function(alpha) -- 0 = clear, 1 = black
+	killFade.BackgroundTransparency = 1 - alpha
+end
+
+FX.fadeIn = function(seconds) -- from black to clear
+	TweenService:Create(killFade, TweenInfo.new(seconds), {BackgroundTransparency = 1}):Play()
+end
+
+local function onHit() FX.hit() end
+local function onSpotted() FX.spotted() end
+
+-- threat meter (difficulty), top right under the camera label
+local threatLabel = label("", UDim2.new(1, -64, 0, 90), Vector2.new(1, 0), Enum.TextXAlignment.Right, 18)
+threatLabel.Visible = FEAT.Difficulty and CONFIG.Difficulty.ShowLabel
+local function updateThreat()
+	local lv = Diff.level()
+	local text, color
+	if lv < 0.25 then text, color = "THREAT: LOW", Color3.fromRGB(190, 230, 190)
+	elseif lv < 0.55 then text, color = "THREAT: MEDIUM", Color3.fromRGB(240, 220, 130)
+	elseif lv < 0.85 then text, color = "THREAT: HIGH", Color3.fromRGB(240, 150, 90)
+	else text, color = "THREAT: EXTREME", Color3.fromRGB(240, 70, 60) end
+	threatLabel.Text = text
+	threatLabel.TextColor3 = color
+end
+
+
+------------------------------------------------------------
+-- 5. CORE: monster gameplay (AI, damage, items, difficulty). Uses the FX API for all visuals/audio.
+------------------------------------------------------------
 local function getTarget()
 	local ch = player.Character
 	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
@@ -1201,6 +1890,13 @@ local function pickupItem(kind)
 		energies += 1
 		showToast("Energy drink added  (" .. CONFIG.EnergyKey.Name .. " to drink)")
 	end
+	if not FEAT.Inventory then
+		if kind == "medkit" then
+			useMedkit()
+		elseif kind == "energy" then
+			useEnergy()
+		end
+	end
 	refreshInventory()
 	if pickSnd then pickSnd:Play() end
 end
@@ -1251,22 +1947,46 @@ local function makeItem(kind, pos, parent)
 	-- faint glow so the item can be found in the dark
 	new("PointLight", {Color = info.color, Range = 7, Brightness = 0.8}, main, true)
 
-	local prompt = new("ProximityPrompt", {
-		ActionText = "Take",
-		ObjectText = info.label,
-		HoldDuration = 0.2,
-		MaxActivationDistance = 9,
-		RequiresLineOfSight = false,
-		KeyboardKeyCode = Enum.KeyCode.E,
-	}, main)
-	prompt.Triggered:Connect(function()
-		pickupItem(kind)
-		model:Destroy()
-	end)
+	if Support.Prompts then
+		local prompt = new("ProximityPrompt", {
+			ActionText = "Take",
+			ObjectText = info.label,
+			HoldDuration = 0.2,
+			MaxActivationDistance = 9,
+			RequiresLineOfSight = false,
+			KeyboardKeyCode = Enum.KeyCode.E,
+		}, main)
+		C(prompt.Triggered, function()
+			pickupItem(kind)
+			model:Destroy()
+		end)
+	else
+		-- ProximityPrompts are unsupported here: items are picked up with [E] (see pickupNearest)
+		table.insert(itemRegistry, {model = model, main = main, kind = kind})
+	end
 
 	model.PrimaryPart = main
 	model.Parent = parent
 	return model
+end
+
+pickupNearest = function()
+	local tgt = getTarget()
+	if not tgt then return end
+	local bestIdx, bestDist
+	for i, it in ipairs(itemRegistry) do
+		if it.model.Parent then
+			local d = (it.main.Position - tgt.hrp.Position).Magnitude
+			if d < 9 and (not bestDist or d < bestDist) then
+				bestIdx, bestDist = i, d
+			end
+		end
+	end
+	if bestIdx then
+		local it = table.remove(itemRegistry, bestIdx)
+		pickupItem(it.kind)
+		it.model:Destroy()
+	end
 end
 
 ------------------------------------------------------------
@@ -1371,12 +2091,528 @@ local function spawnItems()
 end
 
 ------------------------------------------------------------
+-- FX SYSTEMS (client-side visuals and audio only; they never change gameplay state)
+--   flashlight flicker, creepy ambient sounds, fake footsteps, hallucinations,
+--   screen glitches and jumpscares. Each one has a switch in CONFIG.Features.
+------------------------------------------------------------
+local fxFolder = Instance.new("Folder")
+fxFolder.Name = "HorrorFX"
+fxFolder.Parent = workspace
+
+local function rr(a, b) return a + math.random() * (b - a) end
+
+-- next event time; events come more often as the difficulty rises
+local function nextIn(minV, maxV)
+	return os.clock() + rr(minV, maxV) / math.max(Diff.get("Scares"), 0.1)
+end
+
+local FXS = {
+	monsterDist = math.huge,
+	flick = {queue = nil, idx = 1, t = 0, off = false, dim = 1, nextAt = nextIn(CONFIG.Flicker.MinInterval, CONFIG.Flicker.MaxInterval)},
+	nextAmbient = nextIn(CONFIG.Ambient.MinInterval, CONFIG.Ambient.MaxInterval),
+	nextFake = nextIn(CONFIG.FakeFootsteps.MinInterval, CONFIG.FakeFootsteps.MaxInterval),
+	nextHallu = nextIn(CONFIG.Hallucination.MinInterval, CONFIG.Hallucination.MaxInterval),
+	nextGlitch = nextIn(CONFIG.Glitch.MinInterval, CONFIG.Glitch.MaxInterval),
+	nextScare = nextIn(CONFIG.Jumpscare.MinInterval, CONFIG.Jumpscare.MaxInterval),
+	fake = nil, figure = nil, eyes = nil, ghost = nil,
+	tint = nil, tintUntil = 0,
+	failures = 0,
+}
+
+-- ground point under (x, z), ignoring the player and FX objects
+local function groundPoint(x, z, refY)
+	local ignore = {fxFolder}
+	if player.Character then table.insert(ignore, player.Character) end
+	if itemsFolder then table.insert(ignore, itemsFolder) end
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = ignore
+	local hit = workspace:Raycast(Vector3.new(x, refY + 6, z), Vector3.new(0, -80, 0), params)
+	if hit and hit.Normal.Y > 0.8 and hit.Material ~= Enum.Material.Water then return hit.Position end
+	return nil
+end
+
+local function flatLook()
+	local look = camera.CFrame.LookVector
+	local flat = Vector3.new(look.X, 0, look.Z)
+	if flat.Magnitude < 0.1 then return nil end
+	return flat.Unit
+end
+
+local function onScreen(point)
+	local _, on = camera:WorldToViewportPoint(point)
+	return on
+end
+
+----------------------------------------------------------
+-- 1. FLASHLIGHT FLICKER: random blink patterns, plus dimming when the monster is near
+----------------------------------------------------------
+local function startFlickerPattern()
+	local q = {}
+	for _ = 1, math.random(2, 5) do
+		table.insert(q, 0.03 + math.random() * 0.1)   -- dark
+		table.insert(q, 0.04 + math.random() * 0.14)  -- light
+	end
+	if math.random() < 0.35 then
+		table.insert(q, 0.4 + math.random() * 0.45)   -- a long dark moment
+	end
+	FXS.flick.queue, FXS.flick.idx, FXS.flick.t = q, 1, 0
+end
+
+local function updateFlicker(dt, now)
+	local f = FXS.flick
+	if FEAT.Flicker and not f.queue and now >= f.nextAt then
+		startFlickerPattern()
+	end
+	if f.queue then
+		f.t += dt
+		local dur = f.queue[f.idx]
+		if f.t >= dur then
+			f.t -= dur
+			f.idx += 1
+			if f.idx > #f.queue then
+				f.queue = nil
+				f.nextAt = nextIn(CONFIG.Flicker.MinInterval, CONFIG.Flicker.MaxInterval)
+			end
+		end
+		f.off = f.queue ~= nil and (f.idx % 2 == 1)
+	else
+		f.off = false
+	end
+	local targetDim = 1
+	if FEAT.Flicker and FXS.monsterDist < 45 then
+		targetDim = 1 - CONFIG.Flicker.DimAmount * (1 - FXS.monsterDist / 45)
+	end
+	f.dim += (targetDim - f.dim) * math.min(dt * 4, 1)
+end
+
+FX.flickerOff = function() return FXS.flick.off end
+FX.flickerDim = function() return FXS.flick.dim end
+
+----------------------------------------------------------
+-- 2. CREEPY AMBIENT SOUNDS: one-shot sounds from random places around you
+----------------------------------------------------------
+local function ambientEvent()
+	local list = CONFIG.AmbientEvents
+	if #list == 0 then return end
+	local ev = list[math.random(1, #list)]
+	local tgt = getTarget()
+	if not tgt then return end
+	local ang = math.random() * math.pi * 2
+	local r = rr(CONFIG.Ambient.Radius[1], CONFIG.Ambient.Radius[2])
+	local pos = tgt.hrp.Position + Vector3.new(math.cos(ang) * r, 0, math.sin(ang) * r)
+	local part = new("Part", {
+		Anchored = true, CanCollide = false, CanQuery = false, CanTouch = false, Transparency = 1,
+		Size = Vector3.new(0.5, 0.5, 0.5), CFrame = CFrame.new(pos),
+	}, fxFolder)
+	local snd = makeSound(part, ev.id, {
+		Volume = ev.volume * CONFIG.Ambient.Volume, PlaybackSpeed = ev.speed,
+		RollOffMode = Enum.RollOffMode.InverseTapered, RollOffMinDistance = 8, RollOffMaxDistance = 150,
+	})
+	if not snd then
+		part:Destroy()
+		return
+	end
+	addReverb(snd, -2)
+	if ev.distortion then addDistortion(snd, ev.distortion) end
+	snd:Play()
+	Debris:AddItem(part, 10)
+end
+
+----------------------------------------------------------
+-- 3. FAKE FOOTSTEPS: steps that creep up behind you; they stop dead when you turn around
+----------------------------------------------------------
+local function stopFakeFootsteps()
+	local f = FXS.fake
+	if f then
+		pcall(function() f.part:Destroy() end)
+		FXS.fake = nil
+	end
+end
+
+local function startFakeFootsteps()
+	if FXS.fake or CONFIG.Sounds.Walk == "" then return end
+	local tgt = getTarget()
+	local flat = flatLook()
+	if not tgt or not flat then return end
+	local side = Vector3.new(-flat.Z, 0, flat.X) * (math.random() < 0.5 and 1 or -1) * rr(2, 6)
+	local part = new("Part", {
+		Anchored = true, CanCollide = false, CanQuery = false, CanTouch = false, Transparency = 1,
+		Size = Vector3.new(0.5, 0.5, 0.5), CFrame = CFrame.new(tgt.hrp.Position - flat * 28),
+	}, fxFolder)
+	local snd = makeSound(part, CONFIG.Sounds.Walk, {
+		Looped = true, Volume = 0, PlaybackSpeed = 0.8,
+		RollOffMode = Enum.RollOffMode.InverseTapered, RollOffMinDistance = 6, RollOffMaxDistance = 90,
+	})
+	if not snd then
+		part:Destroy()
+		return
+	end
+	addReverb(snd, -4)
+	snd:Play()
+	FXS.fake = {part = part, snd = snd, t = 0, side = side, startBack = rr(24, 32), endBack = rr(7, 10)}
+end
+
+local function updateFakeFootsteps(dt)
+	local f = FXS.fake
+	if not f then return end
+	local tgt = getTarget()
+	local flat = flatLook()
+	if not tgt or not flat or not f.part.Parent then
+		stopFakeFootsteps()
+		return
+	end
+	f.t += dt
+	local dur = CONFIG.FakeFootsteps.Duration
+	local u = math.clamp(f.t / dur, 0, 1)
+	local back = f.startBack + (f.endBack - f.startBack) * u
+	local pos = tgt.hrp.Position - flat * back + f.side * (1 - u)
+	f.part.CFrame = CFrame.new(pos)
+	f.snd.Volume = CONFIG.FakeFootsteps.Volume * (0.25 + 0.75 * u)
+	f.snd.PlaybackSpeed = 0.75 + u * 0.1
+
+	local toPart = pos - tgt.hrp.Position
+	local facing = toPart.Magnitude > 0.1 and flat:Dot(toPart.Unit) > 0.55
+	if facing or f.t >= dur then
+		stopFakeFootsteps()
+	end
+end
+
+----------------------------------------------------------
+-- 4. HALLUCINATIONS: a shadow figure at the edge of view, eyes in the dark, a flashed whisper
+----------------------------------------------------------
+local hallLabel = new("TextLabel", {
+	AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.42, 0), Size = UDim2.fromOffset(760, 80),
+	BackgroundTransparency = 1, Text = "", Font = Enum.Font.Creepster, TextSize = 58,
+	TextColor3 = Color3.fromRGB(200, 25, 25), TextStrokeTransparency = 0.4, Visible = false, ZIndex = 12,
+}, gui)
+
+local function clearFigure()
+	if FXS.figure then
+		pcall(function() FXS.figure.model:Destroy() end)
+		FXS.figure = nil
+	end
+end
+
+local function clearEyes()
+	if FXS.eyes then
+		pcall(function() FXS.eyes.model:Destroy() end)
+		FXS.eyes = nil
+	end
+end
+
+local function spawnFigure()
+	if FXS.figure then return end
+	local tgt = getTarget()
+	local flat = flatLook()
+	if not tgt or not flat then return end
+	for _ = 1, 10 do
+		local ang = math.rad(rr(32, 62)) * (math.random() < 0.5 and 1 or -1)
+		local dir = CFrame.Angles(0, ang, 0):VectorToWorldSpace(flat)
+		local p = tgt.hrp.Position + dir * rr(34, 62)
+		local g = groundPoint(p.X, p.Z, tgt.hrp.Position.Y)
+		if g then
+			local model = Instance.new("Model")
+			model.Name = "HorrorFigure"
+			local base = CFrame.lookAt(g, Vector3.new(tgt.hrp.Position.X, g.Y, tgt.hrp.Position.Z))
+			local function part(size, off, color, material, shape)
+				local pt = Instance.new("Part")
+				pt.Anchored = true
+				pt.CanCollide = false
+				pt.CanQuery = false
+				pt.CanTouch = false
+				pt.Size = size
+				pt.CFrame = base * off
+				pt.Color = color
+				pt.Material = material or Enum.Material.Slate
+				if shape then pt.Shape = shape end
+				pt.Parent = model
+				return pt
+			end
+			local black = Color3.fromRGB(8, 8, 10)
+			part(Vector3.new(1.0, 5.6, 0.6), CFrame.new(0, 2.8, 0), black)
+			local head = part(Vector3.new(0.95, 1.2, 0.8), CFrame.new(0, 6.2, 0), black)
+			part(Vector3.new(0.3, 5.0, 0.3), CFrame.new(-0.75, 3.5, 0), black)
+			part(Vector3.new(0.3, 5.0, 0.3), CFrame.new(0.75, 3.5, 0), black)
+			for _, side in ipairs({-1, 1}) do
+				part(Vector3.new(0.18, 0.18, 0.18), CFrame.new(side * 0.22, 6.25, -0.42), CONFIG.MonsterEyeColor, Enum.Material.Neon, Enum.PartType.Ball)
+			end
+			model.Parent = fxFolder
+			FXS.figure = {model = model, head = head, born = os.clock(), seenT = 0}
+			return
+		end
+	end
+end
+
+local function spawnEyes()
+	if FXS.eyes then return end
+	local tgt = getTarget()
+	local flat = flatLook()
+	if not tgt or not flat then return end
+	local ang = math.rad(rr(-55, 55))
+	local dir = CFrame.Angles(0, ang, 0):VectorToWorldSpace(flat)
+	local pos = tgt.hrp.Position + dir * rr(18, 40) + Vector3.new(0, rr(0.5, 2.5), 0)
+	local model = Instance.new("Model")
+	model.Name = "HorrorEyes"
+	local right = Vector3.new(-dir.Z, 0, dir.X)
+	local parts = {}
+	for _, side in ipairs({-1, 1}) do
+		local pt = Instance.new("Part")
+		pt.Anchored = true
+		pt.CanCollide = false
+		pt.CanQuery = false
+		pt.CanTouch = false
+		pt.Shape = Enum.PartType.Ball
+		pt.Size = Vector3.new(0.35, 0.35, 0.35)
+		pt.Material = Enum.Material.Neon
+		pt.Color = CONFIG.MonsterEyeColor
+		pt.CFrame = CFrame.new(pos + right * side * 0.45)
+		pt.Parent = model
+		table.insert(parts, pt)
+	end
+	model.Parent = fxFolder
+	FXS.eyes = {model = model, parts = parts, pos = pos, born = os.clock(), seenT = 0, blinkAt = os.clock() + rr(0.5, 1.2), blinkUntil = 0}
+end
+
+local function whisperText()
+	local list = CONFIG.Hallucination.Texts
+	if #list == 0 then return end
+	hallLabel.Text = list[math.random(1, #list)]
+	hallLabel.Position = UDim2.new(0.5, math.random(-60, 60), 0.42, math.random(-30, 30))
+	hallLabel.Visible = true
+	staticBurst = math.max(staticBurst, 0.6)
+	glitch = 1
+	task.delay(rr(0.1, 0.22), function()
+		hallLabel.Visible = false
+	end)
+end
+
+local function hallucination(kind)
+	local types = CONFIG.Hallucination.Types
+	if #types == 0 then return end
+	kind = kind or types[math.random(1, #types)]
+	if kind == "figure" then spawnFigure()
+	elseif kind == "eyes" then spawnEyes()
+	elseif kind == "text" then whisperText() end
+end
+
+local function updateHallucinations(dt, now)
+	local fg = FXS.figure
+	if fg then
+		if not fg.head.Parent then
+			clearFigure()
+		else
+			if onScreen(fg.head.Position) then fg.seenT += dt else fg.seenT = 0 end
+			-- it vanishes the moment you look straight at it (or after a few seconds)
+			if fg.seenT > 0.45 or now - fg.born > CONFIG.Hallucination.Lifetime then
+				if fg.seenT > 0.45 then
+					FX.shake(0.12)
+					staticBurst = math.max(staticBurst, 0.5)
+				end
+				clearFigure()
+			end
+		end
+	end
+	local ey = FXS.eyes
+	if ey then
+		if now >= ey.blinkAt then
+			ey.blinkUntil = now + 0.12
+			ey.blinkAt = now + rr(0.6, 1.6)
+		end
+		local vis = now >= ey.blinkUntil
+		for _, p in ipairs(ey.parts) do p.Transparency = vis and 0 or 1 end
+		if onScreen(ey.pos) then ey.seenT += dt else ey.seenT = 0 end
+		if ey.seenT > 0.6 or now - ey.born > 3.5 then
+			clearEyes()
+		end
+	end
+end
+
+----------------------------------------------------------
+-- 5. SCREEN GLITCHES: tint flashes, torn blocks, blackouts, jitter, the tracking bar
+----------------------------------------------------------
+local glitchBlocks = {}
+for i = 1, 8 do
+	glitchBlocks[i] = new("Frame", {BorderSizePixel = 0, Visible = false, ZIndex = 11}, gui)
+end
+
+local function glitchBurst(kind)
+	local kinds = {"tint", "blocks", "blackout", "jitter", "bar"}
+	kind = kind or kinds[math.random(1, #kinds)]
+	if kind == "tint" then
+		FXS.tintUntil = os.clock() + rr(0.08, 0.2)
+		FXS.tint = (math.random() < 0.5) and Color3.fromRGB(90, 255, 255) or Color3.fromRGB(255, 80, 120)
+	elseif kind == "blocks" then
+		local vp = camera.ViewportSize
+		for _, b in ipairs(glitchBlocks) do
+			b.Visible = true
+			b.Size = UDim2.fromOffset(math.random(60, 360), math.random(6, 40))
+			b.Position = UDim2.fromOffset(math.random(0, math.max(1, math.floor(vp.X))), math.random(0, math.max(1, math.floor(vp.Y))))
+			b.BackgroundColor3 = (math.random() < 0.5) and Color3.new(1, 1, 1) or Color3.fromRGB(40, 255, 255)
+			b.BackgroundTransparency = 0.55 + math.random() * 0.3
+		end
+		task.delay(rr(0.06, 0.14), function()
+			for _, b in ipairs(glitchBlocks) do b.Visible = false end
+		end)
+	elseif kind == "blackout" then
+		if not killing and killFade.BackgroundTransparency > 0.99 then
+			killFade.BackgroundTransparency = 0
+			task.delay(rr(0.04, 0.09), function()
+				if alive and not killing then killFade.BackgroundTransparency = 1 end
+			end)
+		end
+	elseif kind == "jitter" then
+		FX.shake(0.35)
+		glitch = 1
+	elseif kind == "bar" and FEAT.VHSOverlay then
+		bar.Visible = true
+		bar.Position = UDim2.new(0, 0, -0.05, 0)
+		local dur = 0.5 + math.random() * 0.6
+		TweenService:Create(bar, TweenInfo.new(dur, Enum.EasingStyle.Linear), {Position = UDim2.new(0, 0, 1.02, 0)}):Play()
+		glitch = 1
+		task.delay(dur, function() bar.Visible = false end)
+	end
+end
+
+FX.glitch = glitchBurst
+FX.tint = function()
+	if FXS.tint and os.clock() < FXS.tintUntil then return FXS.tint end
+	return nil
+end
+
+----------------------------------------------------------
+-- 6. JUMPSCARES (non-lethal): a monster face in your face, a shape behind you, a flash
+----------------------------------------------------------
+local function clearGhost()
+	if FXS.ghost then
+		pcall(function() FXS.ghost.g.model:Destroy() end)
+		FXS.ghost = nil
+	end
+end
+
+local function spawnGhost(scale, distance, behind, life)
+	if FXS.ghost then return end
+	local flat = flatLook() or Vector3.new(0, 0, -1)
+	local cf = camera.CFrame
+	local g = buildMonster(scale)
+	for _, d in ipairs(g.model:GetDescendants()) do
+		if d:IsA("Sound") then d:Destroy() end
+	end
+	g.root.Anchored = true
+	local dir = behind and -flat or flat
+	local headUp = 6.55 * scale
+	local pos = cf.Position + dir * distance
+	local rootPos = Vector3.new(pos.X, cf.Position.Y - headUp, pos.Z)
+	g.root.CFrame = CFrame.lookAt(rootPos, Vector3.new(cf.Position.X, rootPos.Y, cf.Position.Z))
+	g.model.Parent = fxFolder
+	local head = g.model:FindFirstChild("Head")
+	if head then
+		new("PointLight", {Color = Color3.fromRGB(255, 235, 220), Range = 14, Brightness = 3}, head, true)
+	end
+	FXS.ghost = {g = g, born = os.clock(), life = life, basePos = cf.Position, dir = dir, distance = distance, headUp = headUp}
+end
+
+local function updateGhost(dt, now)
+	local gh = FXS.ghost
+	if not gh then return end
+	local u = (now - gh.born) / gh.life
+	if u >= 1 or not gh.g.model.Parent then
+		clearGhost()
+		return
+	end
+	-- the face lunges a little toward the camera while its mouth is wide open
+	local dist = gh.distance - 0.9 * u
+	local pos = gh.basePos + gh.dir * dist
+	local rootPos = Vector3.new(pos.X, gh.basePos.Y - gh.headUp, pos.Z)
+	gh.g.root.CFrame = CFrame.lookAt(rootPos, Vector3.new(gh.basePos.X, rootPos.Y, gh.basePos.Z))
+	gh.g.update(dt, 0, "strike", 1, false)
+end
+
+local function jumpscare(kind)
+	if killing or FXS.ghost then return end
+	local kinds = CONFIG.Jumpscare.Kinds
+	if #kinds == 0 then return end
+	kind = kind or kinds[math.random(1, #kinds)]
+	if kind == "flash" then
+		flash.BackgroundColor3 = Color3.new(1, 1, 1)
+		flash.BackgroundTransparency = 0.05
+		TweenService:Create(flash, TweenInfo.new(0.35), {BackgroundTransparency = 1}):Play()
+		task.delay(0.4, function() flash.BackgroundColor3 = Color3.fromRGB(170, 0, 0) end)
+		FX.shake(0.8)
+		staticBurst = 1
+		FX.sound("scare")
+		glitchBurst("blocks")
+	elseif kind == "face" then
+		spawnGhost(1.5, 3.2, false, 0.65)
+		FX.spotted()
+		FX.shake(1)
+	elseif kind == "behind" then
+		spawnGhost(0.7, 4.0, true, 1.4)
+		FX.shake(0.4)
+		FX.sound("scare")
+	end
+end
+FX.jumpscare = jumpscare
+
+----------------------------------------------------------
+-- scheduler: called every frame by the main loop
+----------------------------------------------------------
+FX.update = function(dt, now, monsterDist)
+	FXS.monsterDist = monsterDist
+	updateFlicker(dt, now)
+
+	if FEAT.AmbientSounds and now >= FXS.nextAmbient then
+		ambientEvent()
+		FXS.nextAmbient = nextIn(CONFIG.Ambient.MinInterval, CONFIG.Ambient.MaxInterval)
+	end
+
+	if FEAT.FakeFootsteps then
+		if not FXS.fake and now >= FXS.nextFake then
+			startFakeFootsteps()
+			FXS.nextFake = nextIn(CONFIG.FakeFootsteps.MinInterval, CONFIG.FakeFootsteps.MaxInterval)
+		end
+		updateFakeFootsteps(dt)
+	end
+
+	if FEAT.Hallucinations then
+		if now >= FXS.nextHallu and not killing then
+			hallucination()
+			FXS.nextHallu = nextIn(CONFIG.Hallucination.MinInterval, CONFIG.Hallucination.MaxInterval)
+		end
+		updateHallucinations(dt, now)
+	end
+
+	if FEAT.ScreenGlitches and now >= FXS.nextGlitch and not killing then
+		glitchBurst()
+		FXS.nextGlitch = nextIn(CONFIG.Glitch.MinInterval, CONFIG.Glitch.MaxInterval)
+	end
+
+	if FEAT.Jumpscares and now >= FXS.nextScare and not killing then
+		jumpscare()
+		FXS.nextScare = nextIn(CONFIG.Jumpscare.MinInterval, CONFIG.Jumpscare.MaxInterval)
+	end
+	updateGhost(dt, now)
+end
+
+-- a failing FX system must never break the game: after 3 errors the FX layer is switched off
+FX.disableAll = function()
+	for _, k in ipairs({"Flicker", "AmbientSounds", "FakeFootsteps", "Hallucinations", "ScreenGlitches", "Jumpscares"}) do
+		FEAT[k] = false
+	end
+	stopFakeFootsteps()
+	clearFigure()
+	clearEyes()
+	clearGhost()
+end
+
+
+------------------------------------------------------------
 -- FLARE GUN
 ------------------------------------------------------------
 local lastFlare = 0
 fireFlare = function()
 	local now = os.clock()
-	if killing then return end
+	if killing or not FEAT.FlareGun then return end
 	if not hasFlareGun then return end
 	if flares <= 0 then
 		showToast("No flares")
@@ -1418,7 +2654,7 @@ fireFlare = function()
 
 	local flightTime = 0
 	local conn
-	conn = RunService.Heartbeat:Connect(function(dt)
+	conn = C(RunService.Heartbeat, function(dt)
 		flightTime += dt
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Exclude
@@ -1499,7 +2735,7 @@ local function canSee(root, target, model)
 	local toPlayer = target.hrp.Position - root.Position
 	local flat = Vector3.new(toPlayer.X, 0, toPlayer.Z)
 	local d = flat.Magnitude
-	local range = CONFIG.MonsterSightRange * (flashOn and CONFIG.FlashlightSightMultiplier or 1)
+	local range = CONFIG.MonsterSightRange * (flashOn and CONFIG.FlashlightSightMultiplier or 1) * Diff.get("Sight")
 	if d > range then return false end
 	if d > 0.5 then
 		local look = root.CFrame.LookVector
@@ -1708,7 +2944,7 @@ local function runDecoy(pos)
 	local jumpCount = 0
 	local armsAngle = 0.05
 
-	local conn = RunService.Heartbeat:Connect(function(dt)
+	local conn = C(RunService.Heartbeat, function(dt)
 		if not d.root.Parent then return end
 		local airborne = d.humanoid.FloorMaterial == Enum.Material.Air
 		local armTarget, legTarget = 0.05, 0
@@ -1726,7 +2962,7 @@ local function runDecoy(pos)
 	end)
 
 	local result = nil
-	while d.model.Parent do
+	while d.model.Parent and alive do
 		local now = os.clock()
 		local tgt = getTarget()
 		if not tgt then break end
@@ -1757,11 +2993,10 @@ local function runDecoy(pos)
 	end
 
 	-- reveal: the "player" convulses and its head twists around backwards
-	onSpotted()
-	if scareSnd then scareSnd:Play() end
+	FX.spotted()
 	local rootCF = d.root.CFrame
 	local t0 = os.clock()
-	while os.clock() - t0 < 1.0 and d.model.Parent do
+	while os.clock() - t0 < 1.0 and d.model.Parent and alive do
 		local t = os.clock() - t0
 		RunService.Heartbeat:Wait()
 		d.root.CFrame = rootCF * CFrame.new((math.random() - 0.5) * 0.35, 0, (math.random() - 0.5) * 0.35)
@@ -1769,12 +3004,12 @@ local function runDecoy(pos)
 		for _, side in ipairs({-1, 1}) do
 			d.arms[side].joint.C0 = d.arms[side].pos * CFrame.Angles(0, 0, side * 0.05)
 		end
-		staticBurst = 1
-		shake = math.max(shake, 0.4)
+		FX.static(1)
+		FX.shake(0.4)
 	end
 
 	-- the shell bursts open: every part flies apart
-	if hitSnd then hitSnd:Play() end
+	FX.sound("hit")
 	for _, obj in ipairs(d.model:GetDescendants()) do
 		if obj:IsA("Motor6D") then obj:Destroy() end
 	end
@@ -1824,11 +3059,25 @@ local function runMonster(opts)
 	local lastTick = os.clock()
 	local lastTeleport = -math.huge
 	local wantDecoy = false
+	local decoyAt, decoyTries = nil, 0
+	local chaseTime = 0          -- seconds spent running after the player (the decoy trigger)
 	local nextDecoyAt = os.clock() + math.random(CONFIG.DecoyMinInterval, CONFIG.DecoyMaxInterval)
+	local adaptive = 1
 
-	-- pathfinding
+	-- speed: base value * difficulty (* adaptive boost while chasing)
+	local function spdOf(base, chasing)
+		local v = base * Diff.get("Speed")
+		if chasing then v = v * adaptive end
+		return v
+	end
+
+	-- pathfinding (falls back to straight movement if the game does not support it)
 	local waypoints, wpIndex, pathGoal, pathTime = nil, 1, nil, 0
 	local function followPath(goal)
+		if not Support.Pathfinding then
+			humanoid:MoveTo(goal)
+			return true
+		end
 		if not waypoints or not pathGoal or (goal - pathGoal).Magnitude > 8 or os.clock() - pathTime > 1.5 then
 			local path = PathfindingService:CreatePath({
 				AgentRadius = 2.5,
@@ -1895,13 +3144,36 @@ local function runMonster(opts)
 		m.update(step, speed, state, attackT, now < me.stunUntil)
 		attackT = math.max(0, attackT - step)
 	end)
+	table.insert(conns, conn)
 
-	-- KILL SCENE: the monster lunges at the player, the camera looks into its mouth
+	----------------------------------------------------------
+	-- KILL SCENES (three variants). All visuals/audio go through the FX API.
+	--   lunge  - the monster rushes you from the front, camera stares into its mouth
+	--   grab   - it appears behind you, the camera whips around and you are lifted off the ground
+	--   pounce - it leaps over you in an arc and lands on top of the camera
+	----------------------------------------------------------
+	local function pickKillVariant()
+		local list = CONFIG.KillVariants
+		if #list == 0 then return "lunge" end
+		return list[math.random(1, #list)]
+	end
+
 	local function killSequence(target)
+		-- kill animations switched off: plain death with the hit effect
+		if not FEAT.KillAnimations then
+			FX.hit()
+			killPlayer(target)
+			state = "patrol"
+			dest, waypoints = nil, nil
+			return
+		end
+
+		local variant = pickKillVariant()
 		killing = true
 		setInventory(false)
 		state = "kill"
 		attackT = 99
+		m.setSilent(false)
 
 		local ch, hum, hrp = target.char, target.hum, target.hrp
 		pcall(function()
@@ -1919,76 +3191,105 @@ local function runMonster(opts)
 		dir = dir.Unit
 
 		local ry = root.Position.Y
-		local playerFlat = Vector3.new(hrp.Position.X, ry, hrp.Position.Z)
-		local startPos = playerFlat + dir * 10
-		local endPos = playerFlat + dir * 4.5
-
-		root.Anchored = true
-		root.AssemblyLinearVelocity = Vector3.zero
-
+		local pFlat = Vector3.new(hrp.Position.X, ry, hrp.Position.Z)
 		local headPart = ch:FindFirstChild("Head")
 		local eyePos = headPart and headPart.Position or (hrp.Position + Vector3.new(0, 1.5, 0))
 		local mhead = model:FindFirstChild("Head")
 
-		camera.CameraType = Enum.CameraType.Scriptable
-		onSpotted()
+		root.Anchored = true
+		root.AssemblyLinearVelocity = Vector3.zero
+
+		local startPos, endPos
+		if variant == "lunge" then
+			startPos, endPos = pFlat + dir * 10, pFlat + dir * 4.5
+		elseif variant == "grab" then
+			startPos, endPos = pFlat - dir * 7, pFlat - dir * 3.4
+		else
+			local sideDir = Vector3.new(-dir.Z, 0, dir.X) * (math.random() < 0.5 and 1 or -1)
+			startPos, endPos = pFlat + dir * 13 + sideDir * 3, pFlat + dir * 0.5
+		end
+
+		FX.cinematic(true)
+		FX.spotted()
 		if m.roar then
 			m.roar.PlaybackSpeed = 0.28
 			m.roar:Play()
 		end
-		if scareSnd then scareSnd:Play() end
+		FX.sound("scare")
 
-		local total = 2.6
+		local total = (variant == "lunge" and 2.6) or (variant == "grab" and 2.5) or 2.3
 		local t0 = os.clock()
 		local struck = false
-		while true do
+		while alive do
 			RunService.RenderStepped:Wait()
 			local t = os.clock() - t0
 			if t >= total then break end
 
-			-- lunge forward
-			local a = math.clamp(t / 0.7, 0, 1)
-			a = a * a * (3 - 2 * a)
-			local p = startPos:Lerp(endPos, a)
-			root.CFrame = CFrame.lookAt(p, playerFlat)
+			local jitterAmt = 0.05 + t * 0.35
+			local jitter = Vector3.new(math.random() - 0.5, math.random() - 0.5, math.random() - 0.5) * jitterAmt
+			local camPos, lookAt, fovNow
 
-			-- camera looks at the monster's head, shaking grows, the player recoils
-			local lookTarget = (mhead and mhead.Position) or (p + Vector3.new(0, 8, 0))
-			local shakeAmt = 0.05 + t * 0.35
-			local jitter = Vector3.new(math.random() - 0.5, math.random() - 0.5, math.random() - 0.5) * shakeAmt
-			camera.CFrame = CFrame.lookAt(eyePos - dir * (t * 0.25) + jitter * 0.4, lookTarget + jitter)
-			camera.FieldOfView = 75 - a * 18 + math.sin(t * 40) * (t * 1.5)
+			if variant == "lunge" then
+				local a = math.clamp(t / 0.7, 0, 1)
+				a = a * a * (3 - 2 * a)
+				local p = startPos:Lerp(endPos, a)
+				root.CFrame = CFrame.lookAt(p, pFlat)
+				lookAt = ((mhead and mhead.Position) or (p + Vector3.new(0, 8, 0))) + jitter
+				camPos = eyePos - dir * (t * 0.25) + jitter * 0.4
+				fovNow = 75 - a * 18 + math.sin(t * 40) * (t * 1.5)
 
-			-- flashlight flickers wildly, static on screen
-			if math.random() < 0.6 then flickerUntil = os.clock() + math.random() * 0.12 end
-			staticBurst = 1
+			elseif variant == "grab" then
+				-- the camera whips around to the monster behind you, then you are lifted
+				local turn = math.clamp(t / 0.35, 0, 1)
+				turn = turn * turn * (3 - 2 * turn)
+				local p = startPos:Lerp(endPos, math.clamp(t / 0.5, 0, 1))
+				root.CFrame = CFrame.lookAt(p, pFlat)
+				local forwardPt = eyePos + dir * 10
+				local mh = (mhead and mhead.Position) or (p + Vector3.new(0, 8, 0))
+				lookAt = forwardPt:Lerp(mh, turn) + jitter
+				local lift = math.clamp((t - 0.5) / 1.0, 0, 1) * 2.4
+				camPos = eyePos + Vector3.new(0, lift, 0) + jitter * 0.5
+				fovNow = 78 + turn * 10 - math.clamp((t - 0.5) / 1.0, 0, 1) * 18
 
-			if t > 1.6 and not struck then
-				struck = true
-				flash.BackgroundTransparency = 0.1
-				TweenService:Create(flash, TweenInfo.new(0.5), {BackgroundTransparency = 1}):Play()
-				if hitSnd then hitSnd:Play() end
+			else -- pounce
+				local u = math.clamp(t / 0.8, 0, 1)
+				local p = startPos:Lerp(endPos, u)
+				local height = math.sin(u * math.pi) * 6 + u * u * 2
+				root.CFrame = CFrame.lookAt(Vector3.new(p.X, ry + height, p.Z), Vector3.new(pFlat.X, ry + height * 0.6, pFlat.Z))
+				lookAt = ((mhead and mhead.Position) or root.Position) + jitter
+				camPos = eyePos + jitter * 0.4
+				fovNow = 75 - u * 14 + math.sin(t * 40) * (t * 1.2)
 			end
-			if t > 2.0 then
-				killFade.BackgroundTransparency = math.clamp(1 - (t - 2.0) / 0.5, 0, 1)
+
+			FX.camera(CFrame.lookAt(camPos, lookAt), fovNow)
+
+			-- the flashlight strobes and the screen fills with static
+			if math.random() < 0.6 then FX.flicker(math.random() * 0.12) end
+			FX.static(1)
+
+			if t > total * 0.62 and not struck then
+				struck = true
+				FX.flashRed(0.1)
+				FX.sound("hit")
+			end
+			if t > total - 0.5 then
+				FX.fade(math.clamp((t - (total - 0.5)) / 0.5, 0, 1))
 			end
 		end
 
-		killFade.BackgroundTransparency = 0
+		FX.fade(1)
 		killPlayer(target)
 		pcall(function() hrp.Anchored = false end)
-		camera.CameraType = Enum.CameraType.Custom
-		camera.FieldOfView = 75
+		FX.cinematic(false)
 		root.Anchored = false
 		killing = false
 		attackT = 0
 		state = "patrol"
 		dest, waypoints = nil, nil
 		task.delay(0.6, function()
-			TweenService:Create(killFade, TweenInfo.new(0.8), {BackgroundTransparency = 1}):Play()
+			if alive then FX.fadeIn(0.8) end
 		end)
 	end
-
 
 	-- EMERGE: the monster climbs out of the burst "player" body and starts chasing
 	local function emergeSequence()
@@ -2005,7 +3306,7 @@ local function runMonster(opts)
 			m.roar.PlaybackSpeed = 0.28
 			m.roar:Play()
 		end
-		while model.Parent do
+		while model.Parent and alive do
 			RunService.Heartbeat:Wait()
 			local t = os.clock() - t0
 			if t >= total then break end
@@ -2021,8 +3322,8 @@ local function runMonster(opts)
 				y = crouchY + (standY - crouchY) * a
 			end
 			root.CFrame = CFrame.lookAt(Vector3.new(px, y, pz), Vector3.new(emerge.lookAt.X, y, emerge.lookAt.Z))
-			staticBurst = math.max(staticBurst, 0.5)
-			shake = math.max(shake, 0.25)
+			FX.static(0.5)
+			FX.shake(0.25)
 		end
 		root.Anchored = false
 		state = "chase"
@@ -2043,7 +3344,7 @@ local function runMonster(opts)
 		end
 		if now - lastSpot > 3 then
 			lastSpot = now
-			onSpotted()
+			FX.spotted()
 		end
 	end
 
@@ -2059,18 +3360,27 @@ local function runMonster(opts)
 
 	local function enterStrike(now)
 		state = "strike"
-		strikeAt = now + CONFIG.StrikeWindup
-		attackT = CONFIG.StrikeWindup + 0.3
+		strikeAt = now + CONFIG.StrikeWindup * Diff.get("Windup")
+		attackT = CONFIG.StrikeWindup * Diff.get("Windup") + 0.3
 		if m.roar then
 			m.roar.PlaybackSpeed = 0.3
 			m.roar:Play()
 		end
-		onSpotted()
+		FX.spotted()
+	end
+
+	-- the monster lost you after a long chase: a fake player will appear in front of you
+	local function lostPlayer(now)
+		if FEAT.Decoy and chaseTime >= CONFIG.DecoyAfterChaseSeconds then
+			decoyAt = now + 1.5
+			decoyTries = 0
+		end
+		chaseTime = 0
 	end
 
 	if emerge then emergeSequence() end
 
-	while model.Parent and root.Parent do
+	while model.Parent and root.Parent and alive do
 		local now = os.clock()
 		local tickDt = now - lastTick
 		lastTick = now
@@ -2082,6 +3392,7 @@ local function runMonster(opts)
 			local p = getMonsterSpawn()
 			if p then model:PivotTo(CFrame.new(p)) end
 			state, scanUntil, dest, waypoints = "patrol", 0, nil, nil
+			chaseTime, decoyAt = 0, nil
 		end
 
 		-- stunned by a flare: stands still, covers its face with its hands
@@ -2114,7 +3425,7 @@ local function runMonster(opts)
 
 		local target = getTarget()
 		local fdist = target and flatDist(target.hrp.Position, root.Position) or math.huge
-		local sawNow = target ~= nil and canSee(root, target, model)   -- the monster sees the player (70° cone)
+		local sawNow = target ~= nil and canSee(root, target, model)   -- the monster sees the player (70 degree cone)
 		local seen = target ~= nil and playerSeesMonster(model, root)  -- the player sees the monster
 
 		if seen then
@@ -2128,9 +3439,32 @@ local function runMonster(opts)
 			lastSeenPos = target.hrp.Position
 			lastSeenT = now
 		end
+		if state == "chase" then chaseTime += tickDt end
+
+		-- adaptive speed: faster when you are far ahead, a little slower when it is right on top of you
+		adaptive = 1
+		if FEAT.AdaptiveSpeed and target then
+			local A = CONFIG.Adaptive
+			if fdist > A.StartDistance then
+				adaptive = 1 + (A.MaxBoost - 1) * math.clamp((fdist - A.StartDistance) / (A.FullDistance - A.StartDistance), 0, 1)
+			elseif fdist < A.MercyDistance then
+				adaptive = A.MercyMultiplier
+			end
+			if exhausted then adaptive = math.min(adaptive, 1) end
+		end
+
+		-- silent while it is behind you (no footsteps, no rumble)
+		if FEAT.SilentBehind and target then
+			local cf = camera.CFrame
+			local toM = root.Position - cf.Position
+			local behind = (toM.X * cf.LookVector.X + toM.Z * cf.LookVector.Z) < 0
+			m.setSilent(behind and state ~= "strike" and state ~= "kill" and state ~= "emerge")
+		else
+			m.setSilent(false)
+		end
 
 		-- teleport: if the player got too far away, jump to a point TeleportDistance from the player
-		if target and fdist > CONFIG.TeleportTriggerDistance and now - lastTeleport > CONFIG.TeleportCooldown then
+		if FEAT.Teleport and target and fdist > CONFIG.TeleportTriggerDistance and now - lastTeleport > CONFIG.TeleportCooldown then
 			lastTeleport = now
 			local c = target.hrp.Position
 			local pick
@@ -2147,16 +3481,22 @@ local function runMonster(opts)
 				state, scanUntil, dest, waypoints = "patrol", 0, nil, nil
 				fdist = flatDist(c, root.Position)
 				sawNow, seen = false, false
+				chaseTime = 0
 			end
 		end
 
-		-- decoy: sometimes the monster disguises itself as an ordinary player in front of you
-		if state == "patrol" and target and now >= nextDecoyAt and fdist > 40 then
+		-- decoy: queued after a long chase was lost (or, optionally, at random times)
+		local decoyReady = FEAT.Decoy and ((decoyAt ~= nil and now >= decoyAt) or (CONFIG.DecoyRandom and now >= nextDecoyAt))
+		if decoyReady and (state == "patrol" or state == "search") and target and fdist > 40 then
 			local dp = getPointInFront(CONFIG.DecoyDistance)
 			if dp then
 				pendingDecoyPoint = dp
 				wantDecoy = true
 				break
+			end
+			decoyTries += 1
+			if decoyAt then
+				decoyAt = (decoyTries > 5) and nil or (now + 2)
 			end
 			nextDecoyAt = now + 10
 		end
@@ -2164,19 +3504,21 @@ local function runMonster(opts)
 		-- state transitions
 		if state == "patrol" or state == "search" then
 			if sawNow then
-				if seen then enterChase(now) else enterStalk() end
+				if seen or not FEAT.Stalking then enterChase(now) else enterStalk() end
 			end
 		elseif state == "chase" then
 			if not target then
 				state = "patrol"
 				dest, waypoints = nil, nil
-			elseif sawNow and unseenFor > 0.35 then
-				enterStalk() -- player looked away: the monster crouches and creeps up behind
+				chaseTime = 0
+			elseif FEAT.Stalking and sawNow and unseenFor > 0.35 then
+				enterStalk() -- the player looked away: the monster crouches and creeps up behind
 			elseif not sawNow and now - lastSeenT > CONFIG.MonsterSightMemory then
 				state = "search"
 				searchStarted = now
 				scanUntil = 0
 				waypoints = nil
+				lostPlayer(now)
 			end
 		elseif state == "stalk" then
 			if not target then
@@ -2194,12 +3536,14 @@ local function runMonster(opts)
 				searchStarted = now
 				scanUntil = 0
 				waypoints = nil
+				lostPlayer(now)
 			end
 		end
 
 		-- behavior in the current state
 		if state == "chase" then
-			humanoid.WalkSpeed = (sawNow and fdist < 35) and CONFIG.MonsterLungeSpeed or CONFIG.MonsterChaseSpeed
+			local base = (sawNow and fdist < 35) and CONFIG.MonsterLungeSpeed or CONFIG.MonsterChaseSpeed
+			humanoid.WalkSpeed = spdOf(base, true)
 			if sawNow then
 				humanoid:MoveTo(target.hrp.Position)
 			elseif lastSeenPos then
@@ -2214,14 +3558,14 @@ local function runMonster(opts)
 				else
 					attackT = 0.45
 					if m.hit then m.hit:Play() end
-					onHit()
+					FX.hit()
 					target.hum:TakeDamage(CONFIG.MonsterDamage)
 				end
 			end
 
 		elseif state == "stalk" then
 			-- creeps crouched behind you and keeps its distance
-			humanoid.WalkSpeed = CONFIG.MonsterStalkSpeed
+			humanoid.WalkSpeed = spdOf(CONFIG.MonsterStalkSpeed, false)
 			if target then
 				if fdist > CONFIG.StalkDistance + 2 then
 					if sawNow then
@@ -2236,7 +3580,7 @@ local function runMonster(opts)
 
 		elseif state == "strike" then
 			-- lunge: the player has StrikeWindup seconds to fire a flare
-			humanoid.WalkSpeed = CONFIG.MonsterLungeSpeed
+			humanoid.WalkSpeed = spdOf(CONFIG.MonsterLungeSpeed, true)
 			if not target then
 				state = "patrol"
 				dest, waypoints = nil, nil
@@ -2248,7 +3592,7 @@ local function runMonster(opts)
 			end
 
 		elseif state == "search" then
-			humanoid.WalkSpeed = CONFIG.MonsterSearchSpeed
+			humanoid.WalkSpeed = spdOf(CONFIG.MonsterSearchSpeed, false)
 			if scanUntil == 0 then
 				if (lastSeenPos and flatDist(root.Position, lastSeenPos) < 6) or now - searchStarted > 15 or not lastSeenPos then
 					scanUntil = now + CONFIG.MonsterSearchTime
@@ -2265,7 +3609,7 @@ local function runMonster(opts)
 			end
 
 		else -- patrol
-			humanoid.WalkSpeed = CONFIG.MonsterWanderSpeed
+			humanoid.WalkSpeed = spdOf(CONFIG.MonsterWanderSpeed, false)
 			if now < scanUntil then
 				humanoid:MoveTo(root.Position)
 			else
@@ -2302,17 +3646,58 @@ local function runMonster(opts)
 		task.wait(state == "strike" and 0.05 or 0.15)
 	end
 
-	conn:Disconnect()
+	pcall(function() conn:Disconnect() end)
 	currentMonster = nil
 	if model.Parent then model:Destroy() end
 	if wantDecoy then return "decoy" end
 	return true
 end
 
+
+------------------------------------------------------------
+-- QUALITY: the auto-quality system lowers the preset when the frame rate drops
+------------------------------------------------------------
+local function applyQuality()
+	lines.Visible = Q.Scanlines > 0
+	for i, dot in ipairs(dots) do
+		dot.Visible = i <= Q.Dots
+	end
+	spot.Shadows = Q.Shadows
+	core.Shadows = Q.Shadows
+	if typeof(bloom) == "Instance" then bloom.Enabled = Q.Bloom end
+end
+
+local function lowerQuality()
+	local idx
+	for i, n in ipairs(QUALITY_ORDER) do
+		if n == qualityName then idx = i end
+	end
+	if not idx or idx >= #QUALITY_ORDER then return end
+	qualityName = QUALITY_ORDER[idx + 1]
+	for k, v in pairs(CONFIG.QualityPresets[qualityName]) do Q[k] = v end
+	applyQuality()
+	print("[HorrorMode] Low frame rate - quality lowered to " .. qualityName)
+end
+
+-- features that need the old-camera layer are hidden when it is switched off
+if not FEAT.VHSOverlay then
+	lines.Visible = false
+	for _, f in ipairs(vignette) do f.Visible = false end
+	for _, dot in ipairs(dots) do dot.Visible = false end
+	bar.Visible = false
+	if typeof(cc) == "Instance" then cc.Enabled = false end
+	if typeof(blur) == "Instance" then blur.Enabled = false end
+else
+	applyQuality()
+end
+
 ------------------------------------------------------------
 -- 6. MAIN LOOP
 ------------------------------------------------------------
-RunService.RenderStepped:Connect(function(dt)
+local threatT = 0
+
+C(RunService.RenderStepped, function(dt)
+	if not alive then return end
 	local now = os.clock()
 	camera = workspace.CurrentCamera
 
@@ -2329,13 +3714,25 @@ RunService.RenderStepped:Connect(function(dt)
 	shake = math.max(0, shake - dt * 1.2)
 	eff = math.clamp(intensity + staticBurst, 0, 1)
 
+	-- FX layer (a failing FX system can never break the game)
+	local okFx, errFx = pcall(FX.update, dt, now, monsterDist)
+	if not okFx then
+		FX.failures = (FX.failures or 0) + 1
+		warn("[HorrorMode] FX error: " .. tostring(errFx))
+		if FX.failures >= 3 then
+			FX.disableAll()
+			warn("[HorrorMode] FX layer switched off after repeated errors.")
+		end
+	end
+
 	-- sprint, stamina, head bob
 	local character = player.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if humanoid and not saved.walkSpeed then saved.walkSpeed = humanoid.WalkSpeed end
 	local sprinting = false
 	if humanoid and humanoid.Health > 0 and not killing then
 		local moving = humanoid.MoveDirection.Magnitude > 0.1
-		sprinting = sprintHeld and moving and not exhausted and stamina > 0
+		sprinting = FEAT.Sprint and sprintHeld and moving and not exhausted and stamina > 0
 
 		if sprinting then
 			stamina -= dt / CONFIG.StaminaSeconds
@@ -2366,7 +3763,8 @@ RunService.RenderStepped:Connect(function(dt)
 		end
 		bobT += dt * speed * 0.9
 		local amp = math.clamp(speed / 16, 0, 1.2) * 0.12
-		local sh = (shake + eff * 0.15) * 0.25
+		local shakeScale = FEAT.CameraShake and CONFIG.Shake.Intensity or 0
+		local sh = (shake + eff * 0.15) * 0.25 * shakeScale
 		humanoid.CameraOffset = Vector3.new(
 			math.sin(bobT * 0.5) * amp * 0.6 + (math.random() - 0.5) * sh,
 			math.abs(math.sin(bobT * 0.5)) * amp + (math.random() - 0.5) * sh,
@@ -2380,10 +3778,11 @@ RunService.RenderStepped:Connect(function(dt)
 	if not killing then camera.FieldOfView = fov end
 
 	-- player footsteps (default ones disabled; custom ones depend on surface and sprinting)
-	if stepSnd then
+	if stepSnd and FEAT.PlayerFootsteps then
 		local rootPart = humanoid and humanoid.RootPart
 		local running = rootPart and rootPart:FindFirstChild("Running")
 		if running and running:IsA("Sound") and running.Volume ~= 0 then
+			saved.runningVolume = saved.runningVolume or running.Volume
 			running.Volume = 0
 		end
 		local walking = false
@@ -2421,59 +3820,79 @@ RunService.RenderStepped:Connect(function(dt)
 		invFooter.Text = string.format("HP %d/%d     Stamina %d%%", hp, maxHp, math.floor(stamina * 100))
 	end
 
-	staminaBack.Visible = stamina < 0.999
+	staminaBack.Visible = FEAT.Sprint and stamina < 0.999
 	staminaFill.Size = UDim2.fromScale(stamina, 1)
 	staminaFill.BackgroundColor3 = exhausted and Color3.fromRGB(220, 60, 60) or Color3.new(1, 1, 1)
 
-	-- flashlight: flickers when the monster is near
-	flickerCheck -= dt
-	if flickerCheck <= 0 then
-		flickerCheck = 0.25
-		if monsterDist < 40 and math.random() < 0.35 then
-			flickerUntil = now + 0.08 + math.random() * 0.12
+	-- flashlight: random flicker patterns (FX), plus a quick blink when the monster is near
+	if FEAT.Flicker then
+		flickerCheck -= dt
+		if flickerCheck <= 0 then
+			flickerCheck = 0.25
+			if monsterDist < 40 and math.random() < CONFIG.Flicker.NearMonsterChance then
+				flickerUntil = now + 0.08 + math.random() * 0.12
+			end
 		end
 	end
-	spot.Enabled = flashOn and now >= flickerUntil
+	spot.Enabled = flashOn and now >= flickerUntil and not FX.flickerOff()
 	core.Enabled = spot.Enabled
+	local dim = FX.flickerDim()
+	if math.abs(dim - lastDim) > 0.01 then
+		lastDim = dim
+		spot.Brightness = CONFIG.FlashlightBrightness * dim
+		core.Brightness = CONFIG.FlashlightCoreBrightness * dim
+	end
 	if lightPart.Parent ~= camera then lightPart.Parent = camera end
 	flashCF = flashCF:Lerp(camera.CFrame, math.clamp(dt * 40, 0, 1))
 	lightPart.CFrame = flashCF
 
 	-- post effects
-	blur.Size = 1.2 + eff * 5
-	cc.Saturation = -0.35 - eff * 0.4
-	cc.Contrast = 0.25 + eff * 0.2
-	cc.Brightness = -0.02 + glitch * 0.1 * (0.5 + math.random() * 0.5)
-	cc.TintColor = Color3.fromRGB(225, 235, 215):Lerp(Color3.fromRGB(255, 170, 170), eff * 0.5)
-	for _, f in ipairs(vignette) do
-		f.BackgroundTransparency = 0.35 - eff * 0.3
-	end
+	if FEAT.VHSOverlay then
+		blur.Size = 1.2 + eff * 5
+		cc.Saturation = -0.35 - eff * 0.4
+		cc.Contrast = 0.25 + eff * 0.2
+		cc.Brightness = -0.02 + glitch * 0.1 * (0.5 + math.random() * 0.5)
+		cc.TintColor = FX.tint() or Color3.fromRGB(225, 235, 215):Lerp(Color3.fromRGB(255, 170, 170), eff * 0.5)
+		for _, f in ipairs(vignette) do
+			f.BackgroundTransparency = 0.35 - eff * 0.3
+		end
 
-	lines.Position = UDim2.new(0, 0, 0, (now * 25) % 6)
+		if Q.Scanlines > 0 then
+			lines.Position = UDim2.new(0, 0, 0, (now * 25) % Q.Scanlines)
+		end
 
-	noiseT -= dt
-	if noiseT <= 0 then
-		noiseT = 0.05
-		local vp = camera.ViewportSize
-		for _, dot in ipairs(dots) do
-			local sz = math.random(1, 3 + math.floor(eff * 3))
-			dot.Size = UDim2.fromOffset(sz, sz * math.random(1, 2))
-			dot.Position = UDim2.fromOffset(math.random(0, vp.X), math.random(0, vp.Y))
-			dot.BackgroundTransparency = 0.9 - eff * 0.5 - math.random() * 0.1
-			dot.BackgroundColor3 = math.random() < 0.5 and Color3.new(1, 1, 1) or Color3.fromRGB(150, 150, 150)
+		noiseT -= dt
+		if noiseT <= 0 then
+			noiseT = Q.NoiseRate
+			local vp = camera.ViewportSize
+			for i = 1, math.min(#dots, Q.Dots) do
+				local dot = dots[i]
+				local sz = math.random(1, 3 + math.floor(eff * 3))
+				dot.Size = UDim2.fromOffset(sz, sz * math.random(1, 2))
+				dot.Position = UDim2.fromOffset(math.random(0, vp.X), math.random(0, vp.Y))
+				dot.BackgroundTransparency = 0.9 - eff * 0.5 - math.random() * 0.1
+				dot.BackgroundColor3 = math.random() < 0.5 and Color3.new(1, 1, 1) or Color3.fromRGB(150, 150, 150)
+			end
+		end
+
+		recDot.Visible = (now % 1.2) < 0.7
+		secT -= dt
+		if secT <= 0 then
+			secT = 1
+			local s = os.time() - startTime
+			timeLabel.Text = string.format("%02d:%02d:%02d", math.floor(s / 3600), math.floor(s / 60) % 60, s % 60)
 		end
 	end
 
-	recDot.Visible = (now % 1.2) < 0.7
-	secT -= dt
-	if secT <= 0 then
-		secT = 1
-		local s = os.time() - startTime
-		timeLabel.Text = string.format("%02d:%02d:%02d", math.floor(s / 3600), math.floor(s / 60) % 60, s % 60)
+	-- threat label (difficulty)
+	threatT -= dt
+	if threatT <= 0 then
+		threatT = 2
+		if threatLabel.Visible then updateThreat() end
 	end
 
 	-- heartbeat
-	if beat then
+	if beat and FEAT.Heartbeat then
 		beatT -= dt
 		if beatT <= 0 then
 			local bpm = 55 + eff * 100 + (1 - stamina) * 40
@@ -2481,37 +3900,73 @@ RunService.RenderStepped:Connect(function(dt)
 			beat.Volume = 0.15 + eff * 0.9
 			beat:Play()
 			task.delay(0.17, function()
-				beat.Volume = beat.Volume * 0.7
-				beat:Play()
+				if alive and beat then
+					beat.Volume = beat.Volume * 0.7
+					beat:Play()
+				end
 			end)
+		end
+	end
+
+	-- auto quality: if the average frame rate stays low, drop one quality level
+	fpsT += dt
+	fpsN += 1
+	if fpsT >= 3 then
+		local fps = fpsN / fpsT
+		fpsT, fpsN = 0, 0
+		if CONFIG.AutoQuality and fps < CONFIG.AutoQualityFps then
+			lowerQuality()
 		end
 	end
 end)
 
 ------------------------------------------------------------
--- START: scatter the items around and start the monster (no teleporting you around)
+-- START: scatter the items, fade in ("spawn in") and start the monster
 ------------------------------------------------------------
+killFade.BackgroundTransparency = 0 -- start black (continues the lobby fade); it fades in once the world is ready
+
 task.spawn(function()
 	local ch = player.Character or player.CharacterAdded:Wait()
 	local hrp = ch:WaitForChild("HumanoidRootPart")
 	task.wait(1)
+	if not alive then return end
 	mapOrigin = hrp.Position
 
-	spawnItems()
+	if FEAT.Items then
+		local ok, err = pcall(spawnItems)
+		if not ok then warn("[HorrorMode] Items could not be placed: " .. tostring(err)) end
+	end
 
 	-- after you die the monster moves to a new place near your new spawn
-	player.CharacterAdded:Connect(function()
+	C(player.CharacterAdded, function()
 		monsterNeedsReset = true
 	end)
 
-	local opts = nil
-	while true do
-		local result = runMonster(opts)
-		opts = nil
-		if result == "decoy" then
-			-- the monster is disguised as a player; when you come close it emerges
-			local info = runDecoy(pendingDecoyPoint)
-			if info then opts = {emerge = info} end
+	FX.fadeIn(1.4)
+	showToast("You are in. Survive.")
+
+	local runOpts = nil
+	local errors = 0
+	while alive do
+		local ok, result = pcall(runMonster, runOpts)
+		runOpts = nil
+		if not ok then
+			errors += 1
+			warn("[HorrorMode] Monster error: " .. tostring(result))
+			if errors >= 5 then
+				warn("[HorrorMode] The monster failed 5 times - stopping it.")
+				break
+			end
+			currentMonster = nil
+			task.wait(2)
+		elseif result == "decoy" then
+			-- the monster is disguised as a player; when you come close it bursts out
+			local okD, info = pcall(runDecoy, pendingDecoyPoint)
+			if okD and info then
+				runOpts = {emerge = info}
+			elseif not okD then
+				warn("[HorrorMode] Decoy error: " .. tostring(info))
+			end
 		elseif not result then
 			task.wait(2)
 		else
@@ -2519,3 +3974,135 @@ task.spawn(function()
 		end
 	end
 end)
+
+------------------------------------------------------------
+-- STOP: undo everything this session did
+------------------------------------------------------------
+stopGame = function()
+	if not alive then return end
+	alive = false
+	for _, c in ipairs(conns) do
+		pcall(function() c:Disconnect() end)
+	end
+
+	-- objects this session created in the world
+	for _, o in ipairs(workspace:GetChildren()) do
+		local n = o.Name
+		if n == "HorrorMonster" or n == "HorrorDecoy" or n == "HorrorItems" or n == "HorrorFlare" or n == "HorrorFX" or n == "HorrorFigure" then
+			pcall(function() o:Destroy() end)
+		end
+	end
+	pcall(function() gui:Destroy() end)
+	pcall(function() lightPart:Destroy() end)
+	for _, c in ipairs(Lighting:GetChildren()) do
+		if c:GetAttribute("HorrorKeep") then pcall(function() c:Destroy() end) end
+	end
+
+	-- give the game its sky, atmosphere, effects, lamps and lighting back
+	unstashLightingObjects(saved.stashed)
+	restoreLighting(saved.lighting)
+	for l in pairs(saved.lights) do
+		pcall(function() l.Enabled = true end)
+	end
+
+	-- player and camera
+	pcall(function() player.CameraMode = saved.cameraMode end)
+	local cam = workspace.CurrentCamera
+	pcall(function()
+		cam.CameraType = Enum.CameraType.Custom
+		cam.FieldOfView = saved.fov
+	end)
+	local ch = player.Character
+	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+	local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+	if hum then
+		pcall(function()
+			hum.CameraOffset = Vector3.zero
+			if saved.walkSpeed then hum.WalkSpeed = saved.walkSpeed end
+			hum.JumpPower, hum.JumpHeight = 50, 7.2
+		end)
+	end
+	if hrp then pcall(function() hrp.Anchored = false end) end
+	if saved.runningVolume and hrp then
+		local running = hrp:FindFirstChild("Running")
+		if running and running:IsA("Sound") then running.Volume = saved.runningVolume end
+	end
+
+	-- every sound this script created
+	for _, s in pairs(Runtime.sounds) do
+		pcall(function() s:Destroy() end)
+	end
+
+	if opts.onQuit then task.defer(opts.onQuit) end
+end
+
+-- hotkey: leave the game and go back to the lobby
+C(UserInputService.InputBegan, function(input, gpe)
+	if not gpe and input.KeyCode == CONFIG.StopKey then
+		stopGame()
+	end
+end)
+
+return stopGame
+end
+
+
+------------------------------------------------------------
+-- BOOT: lobby <-> game
+--   PLAY  -> destroys the lobby and starts a game session
+--   STOP  -> stops everything, restores the game and deletes this script
+--   quit to lobby (inventory button or [End]) -> ends the session and shows the lobby again
+------------------------------------------------------------
+local hub = nil
+local startFailures = 0
+local stopSession = nil
+local showHub
+
+local function shutdown()
+	if stopSession then
+		pcall(stopSession)
+		stopSession = nil
+	end
+	if hub then
+		pcall(function() hub:destroy() end)
+		hub = nil
+	end
+	print("[HorrorMode] Stopped and removed.")
+	pcall(function()
+		if script then script:Destroy() end
+	end)
+end
+
+local function startPlaying()
+	hub = nil
+	local ok, stopFn = pcall(startGame, {
+		onQuit = function()
+			stopSession = nil
+			showHub()
+		end,
+	})
+	if ok then
+		stopSession = stopFn
+	else
+		warn("[HorrorMode] Could not start the game: " .. tostring(stopFn))
+		startFailures += 1
+		if startFailures >= 2 then
+			shutdown()
+		else
+			showHub()
+		end
+	end
+end
+
+showHub = function()
+	local ok, h = pcall(Hub.build, {onPlay = startPlaying, onStop = shutdown})
+	if ok then
+		hub = h
+	else
+		-- if the lobby cannot be built (unsupported game), skip it and start playing right away
+		warn("[HorrorMode] Lobby unavailable (" .. tostring(h) .. "), starting the game directly.")
+		startPlaying()
+	end
+end
+
+showHub()
